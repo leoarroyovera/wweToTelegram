@@ -53,10 +53,13 @@ from urllib.parse import urljoin
 import requests
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
+from telethon.tl import types as tltypes
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.functions.messages import (CreateForumTopicRequest,
                                             GetForumTopicsRequest)
 from telethon.tl.types import ForumTopic
+
+from fast_upload import upload_file_fast
 
 ROOT = Path(__file__).resolve().parent
 
@@ -783,6 +786,14 @@ async def get_client():
     return client
 
 
+async def upload_file_parallel(client, path, progress_callback=None):
+    """Sube un archivo con multiples conexiones TCP reales al mismo
+    datacenter (ver fast_upload.py). Devuelve un InputFileBig/InputSizedFile
+    utilizable en send_file(file=...).
+    """
+    return await upload_file_fast(client, Path(path), progress_callback=progress_callback)
+
+
 async def ensure_group(client):
     """
     Busca el supergrupo con temas; lo crea si no existe.
@@ -904,6 +915,30 @@ async def send_media(client, group, topic_id, paths, caption,
     if grande:
         log.error("Archivo demasiado grande para subir: %s (%s)",
                   grande[0].name, human(grande[0].stat().st_size))
+        return False
+
+    # Los ZIP de galeria van solos y como documento: ahi vale la pena la
+    # subida paralela (ver upload_file_parallel). Los albumes de fotos van
+    # por el camino normal, que necesita la ruta en disco para recomprimir
+    # cada imagen antes de subirla.
+    if as_document and len(paths) == 1:
+        for _ in range(MAX_RETRIES):
+            try:
+                handle = await upload_file_parallel(client, paths[0])
+                await client.send_file(
+                    group, handle, caption=caption,
+                    parse_mode="html", reply_to=topic_id,
+                    force_document=True,
+                    file_size=paths[0].stat().st_size,
+                    attributes=[tltypes.DocumentAttributeFilename(paths[0].name)])
+                return True
+            except FloodWaitError as e:
+                log.warning("FloodWait al publicar: %ds", e.seconds)
+                await asyncio.sleep(e.seconds + 5)
+            except Exception as e:
+                log.warning("Fallo al enviar %s: %s", paths[0].name, e)
+                await asyncio.sleep(5)
+        log.error("No se pudieron enviar %d archivo(s).", len(paths))
         return False
 
     for _ in range(MAX_RETRIES):
