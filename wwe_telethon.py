@@ -922,9 +922,22 @@ async def send_media(client, group, topic_id, paths, caption,
     # por el camino normal, que necesita la ruta en disco para recomprimir
     # cada imagen antes de subirla.
     if as_document and len(paths) == 1:
+        size = paths[0].stat().st_size
+        last_pct = [-1]
+
+        def _cb(sent, total):
+            # Sin esto, un ZIP grande a ~0.4 MB/s deja la consola muda
+            # varios minutos y parece colgada (ver run_backfill_all).
+            pct = int(sent * 100 / total) if total else 0
+            if pct != last_pct[0] and pct % 20 == 0:
+                last_pct[0] = pct
+                log.info("  subiendo %s: %d%% de %s",
+                         paths[0].name, pct, human(size))
+
         for _ in range(MAX_RETRIES):
             try:
-                handle = await upload_file_parallel(client, paths[0])
+                handle = await upload_file_parallel(client, paths[0],
+                                                    progress_callback=_cb)
                 await client.send_file(
                     group, handle, caption=caption,
                     parse_mode="html", reply_to=topic_id,
@@ -941,12 +954,27 @@ async def send_media(client, group, topic_id, paths, caption,
         log.error("No se pudieron enviar %d archivo(s).", len(paths))
         return False
 
+    # Un album no toma la ruta rapida de fast_upload (esa es solo para un
+    # documento suelto): Telethon lo sube secuencial, con recompresion de
+    # imagen, al ritmo mas lento medido (~0.23 MB/s). Sin progreso aca, un
+    # album de fotos pesadas deja la consola muda varios minutos.
+    last_done = [-1]
+
+    def _cb(sent, total):
+        # send_file con lista reporta 'sent' fraccionario (2.5 = mitad del
+        # archivo 3 de N); solo interesa marcar cuando se completa uno.
+        done = int(sent)
+        if done != last_done[0]:
+            last_done[0] = done
+            log.info("  album: %d/%d archivo(s) subidos", min(done, len(paths)), len(paths))
+
     for _ in range(MAX_RETRIES):
         try:
             await client.send_file(
                 group, [str(p) for p in paths], caption=caption,
                 parse_mode="html", reply_to=topic_id,
-                force_document=as_document)
+                force_document=as_document,
+                progress_callback=_cb if len(paths) > 1 else None)
             return True
         except FloodWaitError as e:
             log.warning("FloodWait al publicar: %ds", e.seconds)
@@ -994,11 +1022,17 @@ async def publish_gallery(client, group, topics, session, conn, item,
     try:
         # 1) Todas las fotos a disco, numeradas para conservar el orden
         #    dentro del ZIP (el nombre original no siempre lo respeta).
+        # Sin este log, una galeria grande con fotos lentas o que fallan
+        # (cada download_to() puede tardar hasta 120s antes de caer al
+        # preset) deja la consola muda varios minutos y parece colgada.
+        log.info("Galeria '%s': descargando %d fotos...", titulo[:45], len(fotos))
         for i, foto in enumerate(fotos, 1):
             ext = os.path.splitext(foto["image"].split("?")[0])[1] or ".jpg"
             destino = carpeta / ("%03d_%s%s" % (i, foto["fid"], ext))
             if download_to(session, foto, destino):
                 descargadas.append(destino)
+            if i % 10 == 0 or i == len(fotos):
+                log.info("  %d/%d fotos descargadas", i, len(fotos))
         if not descargadas:
             log.error("Galeria %s: ninguna foto descargada.", item["cid"])
             return 0
@@ -1023,11 +1057,14 @@ async def publish_gallery(client, group, topics, session, conn, item,
         # 3) Album de portada: el pie va en el album, que es lo que se ve
         #    en el feed del tema; el ZIP queda justo debajo.
         muestra = descargadas[:ALBUM_MAX]
+        log.info("Galeria '%s': subiendo album de %d fotos...", titulo[:45], len(muestra))
         ok = await send_media(client, group, tid, muestra, pie)
         if not ok:
             return 0
 
         await asyncio.sleep(SEND_DELAY)
+        log.info("Galeria '%s': subiendo ZIP de %d fotos (%s)...",
+                 titulo[:45], len(descargadas), human(tam))
         await send_media(client, group, tid, [zip_path],
                          "📦 %s — %d fotos en calidad original"
                          % (html.escape(titulo)[:200], len(descargadas)),
@@ -1166,7 +1203,7 @@ async def run_once(dry_run=False):
             await client.disconnect()
 
 
-async def run_photos(limit=0, start_page=None, dry_run=False):
+async def run_photos(limit=0, start_page=None, dry_run=False, client=None):
     """
     Modo GALERIAS: recorre /photos, el listado propio de galerias de WWE.
 
@@ -1176,9 +1213,14 @@ async def run_photos(limit=0, start_page=None, dry_run=False):
 
     Cada galeria se publica como un solo post (album de muestra + ZIP), en el
     tema de su show.
+
+    `client`: si se pasa un TelegramClient ya conectado (--backfill-all lo
+    comparte con run_backfill para no abrir dos conexiones a la vez sobre el
+    mismo archivo de sesion), se reusa y NO se desconecta al salir; si no,
+    esta funcion crea y cierra el suyo, como antes.
     """
     conn = db_connect()
-    client = None
+    own_client = client is None
     session = new_session()
     try:
         page = (int(bf_get(conn, "photos_page", "0"))
@@ -1198,7 +1240,8 @@ async def run_photos(limit=0, start_page=None, dry_run=False):
 
         topics = None
         if not dry_run:
-            client = await get_client()
+            if client is None:
+                client = await get_client()
             group = await ensure_group(client)
             topics = await ensure_topics(client, group, TOPICS_ORDER)
 
@@ -1265,11 +1308,11 @@ async def run_photos(limit=0, start_page=None, dry_run=False):
         return hechas
     finally:
         conn.close()
-        if client:
+        if own_client and client:
             await client.disconnect()
 
 
-async def run_backfill(limit=0, start_page=None, dry_run=False):
+async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
     """
     Volcado del archivo historico, pagina a pagina y REANUDABLE.
 
@@ -1283,9 +1326,14 @@ async def run_backfill(limit=0, start_page=None, dry_run=False):
     lo que ya publico la vigilancia no se repite.
 
     limit: paginas a procesar en esta tanda (0 = hasta el final del feed).
+
+    `client`: si se pasa un TelegramClient ya conectado (--backfill-all lo
+    comparte con run_photos para no abrir dos conexiones a la vez sobre el
+    mismo archivo de sesion), se reusa y NO se desconecta al salir; si no,
+    esta funcion crea y cierra el suyo, como antes.
     """
     conn = db_connect()
-    client = None
+    own_client = client is None
     session = new_session()
     try:
         page = int(bf_get(conn, "page", "0")) if start_page is None else start_page
@@ -1294,7 +1342,8 @@ async def run_backfill(limit=0, start_page=None, dry_run=False):
                  page, publicados)
 
         if not dry_run:
-            client = await get_client()
+            if client is None:
+                client = await get_client()
             group = await ensure_group(client)
             topics = await ensure_topics(client, group, TOPICS_ORDER)
 
@@ -1363,6 +1412,69 @@ async def run_backfill(limit=0, start_page=None, dry_run=False):
         return publicados
     finally:
         conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
+async def run_backfill_all(dry_run=False):
+    """
+    Corre portada y galerias historicas HASTA EL FINAL de ambas, alternando
+    tandas en el mismo proceso con un solo TelegramClient compartido.
+
+    Pensado para el unico always-on task disponible en PythonAnywhere
+    Developer: un solo comando que deja corriendo el volcado completo de
+    /homepage (--backfill) y /photos (--photos) sin intervencion, en vez de
+    necesitar dos always-on tasks (uno por modo) que el plan no tiene.
+
+    No se usa asyncio.gather para correrlas en paralelo real porque cada
+    modo abre su propio TelegramClient, y dos clientes escribiendo a la vez
+    sobre el mismo archivo .session (una base SQLite interna de Telethon)
+    puede dar 'database is locked'. En vez de eso se alterna: una tanda
+    chica de portada, una tanda chica de fotos, y se repite. El cuello de
+    botella real es la subida a Telegram (~0.4 MB/s medido, ver
+    fast_upload.py), no la CPU, asi que alternar en vez de paralelizar de
+    verdad no cuesta velocidad total apreciable.
+
+    Reanudable como los modos sueltos: el progreso de cada uno vive en sus
+    propias claves de la tabla 'backfill' ('page'/'done' y
+    'photos_page'/'photos_done'), asi que cortar esto con Ctrl+C o que se
+    caiga el always-on task no pierde avance.
+    """
+    client = None
+    try:
+        if not dry_run:
+            client = await get_client()
+
+        tanda = 0
+        while True:
+            tanda += 1
+            c = db_connect()
+            feed_done = bf_get(c, "done") == "1"
+            photos_done = bf_get(c, "photos_done") == "1"
+            c.close()
+
+            if feed_done and photos_done:
+                log.info("Backfill completo: portada y galerias llegaron al final.")
+                break
+
+            if not feed_done:
+                try:
+                    await run_backfill(limit=1, dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error en tanda de portada (#%d); sigo.", tanda)
+            else:
+                log.info("Portada ya completa; solo faltan galerias.")
+
+            if not photos_done:
+                try:
+                    await run_photos(limit=1, dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error en tanda de galerias (#%d); sigo.", tanda)
+            else:
+                log.info("Galerias ya completas; solo falta portada.")
+
+            await asyncio.sleep(2.0)  # cortesia extra entre tandas alternadas
+    finally:
         if client:
             await client.disconnect()
 
@@ -1430,14 +1542,26 @@ async def amain(args):
         return await do_login()
 
     # Un lock por modo: portada y galerias son independientes y pueden
-    # correr a la vez sin pisarse.
+    # correr a la vez sin pisarse. --backfill-all toma los dos, porque
+    # alterna entre ambos y no deberia convivir con --backfill/--photos
+    # sueltos pisando el mismo progreso a la vez.
+    if args.backfill_all:
+        modos = ["feed", "photos"]
+    else:
+        modos = ["photos" if args.photos else "feed"]
     try:
-        acquire_lock("photos" if args.photos else "feed")
+        for m in modos:
+            acquire_lock(m)
     except AlreadyRunning as e:
         log.warning("Ya hay una ejecucion en curso: %s. Salgo.", e)
+        for m in modos:
+            release_lock(m)
         return 0
     try:
-        if args.photos:
+        if args.backfill_all:
+            log.info("Modo backfill-all: portada + galerias hasta el final de ambas.")
+            await run_backfill_all(args.dry_run)
+        elif args.photos:
             await run_photos(args.limit, args.from_page, args.dry_run)
         elif args.backfill:
             await run_backfill(args.limit, args.from_page, args.dry_run)
@@ -1454,7 +1578,8 @@ async def amain(args):
             await run_once(args.dry_run)
         return 0
     finally:
-        release_lock("photos" if args.photos else "feed")
+        for m in modos:
+            release_lock(m)
 
 
 def main():
@@ -1471,6 +1596,11 @@ def main():
     ap.add_argument("--backfill", action="store_true",
                     help="volcado del archivo historico (~22.200 items), "
                          "reanudable: al relanzar sigue donde iba")
+    ap.add_argument("--backfill-all", action="store_true",
+                    help="portada (--backfill) + galerias (--photos) juntos, "
+                         "alternando tandas hasta el final de ambas. Pensado "
+                         "para dejarlo como unico always-on task, corriendo "
+                         "indefinidamente (nunca corta por un error puntual)")
     ap.add_argument("--limit", type=int, default=0, metavar="N",
                     help="con --backfill/--photos: paginas por tanda "
                          "(0 = sin limite)")
