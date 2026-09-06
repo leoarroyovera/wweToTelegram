@@ -173,9 +173,10 @@ USER_AGENT = (
 TOPIC_ARTICLES = "Articulos"
 TOPIC_EVENTS = "Eventos"
 TOPIC_OTHER = "Otros"
+TOPIC_ICONS = "Iconos"
 
 TOPICS_ORDER = [TOPIC_ARTICLES, TOPIC_EVENTS, "Raw", "SmackDown", "NXT",
-                TOPIC_OTHER]
+                TOPIC_OTHER, TOPIC_ICONS]
 
 # Slug de show (clase CSS de la card) -> tema.
 SHOW_TO_TOPIC = {
@@ -190,10 +191,12 @@ SHOW_TO_TOPIC = {
 
 # Orden de publicacion dentro de cada pasada. Menor = antes.
 # "image" son las sueltas de la home (hero, trending): van tras las cards,
-# que llevan titulo y enlace, pero antes de lo desconocido. Sin una entrada
-# propia caerian al 9 y con un limite bajo no se publicarian nunca.
+# que llevan titulo y enlace, pero antes de lo desconocido. "icon" son los
+# .png/.svg de marca (logos, iconos de nav): van al final, son la prioridad
+# mas baja de contenido real. Sin una entrada propia caerian al 9 y con un
+# limite bajo no se publicarian nunca.
 TYPE_PRIORITY = {"article": 0, "video": 1, "video_playlist": 2,
-                 "gallery": 2, "image": 3, "unknown": 4}
+                 "gallery": 2, "image": 3, "icon": 4, "unknown": 5}
 SHOW_PRIORITY = {
     "wrestlemania": 0, "summerslam": 0, "royalrumble": 0, "survivorseries": 0,
     "wwe": 1, "raw": 2, "smackdown": 2,
@@ -654,12 +657,16 @@ def sort_for_channel(items):
 IMG_ANY_RE = re.compile(
     r'(?:src|srcset|data-src|data-lazy-src)="([^"]+)"', re.I)
 IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|gif|webp|svg)(?:\?|$)", re.I)
+ICON_EXT_RE = re.compile(r"\.(?:png|svg)(?:\?|$)", re.I)
 
-# Logos, iconos de navegacion y promos de plataforma: no son contenido.
-# Los derivados bajo /public/all/ son material de marca reutilizado.
+# Logos, iconos de navegacion y promos de plataforma: no son contenido de
+# feed, pero si son .png/.svg SI interesan (van al tema Iconos mas abajo en
+# vez de descartarse). Filtra ademas assets que ni eso -- sprites CSS
+# fragmentados (#) y placeholders vacios.
 CHROME_RE = re.compile(
     r"/public/all/|logo|nav-|netflix|watch-wwe|sonyliv|sprite|icon|placeholder"
     r"|/themes/|/modules/|advertis", re.I)
+ICON_JUNK_RE = re.compile(r"#|placeholder", re.I)
 
 
 def scrape_loose_images(markup, source="portada"):
@@ -668,7 +675,14 @@ def scrape_loose_images(markup, source="portada"):
 
     La home lleva hero, trending y carruseles que el feed AJAX no cubre:
     medido, 52 imagenes unicas frente a las 38 de las cards. Recoge tambien
-    png/gif/webp/svg, filtrando los logos y adornos del tema.
+    png/gif/webp/svg.
+
+    Las .jpg/.gif/.webp de contenido (fotos) van al tema Otros como antes.
+    Las .png/.svg que matchean CHROME_RE (logos, iconos de nav, sprites)
+    antes se descartaban del todo; ahora van al tema Iconos en vez de
+    perderse -- son justamente los assets de marca que interesa archivar.
+    No se filtra por "/f/" para estos: los iconos suelen vivir en rutas de
+    tema (/themes/, /sites/.../files/) que ese filtro excluia.
 
     Devuelve items con la misma forma que parse_cards, para que el resto del
     flujo (orden, dedupe, publicacion) no cambie.
@@ -681,26 +695,39 @@ def scrape_loose_images(markup, source="portada"):
             url = html.unescape(cand.strip().split(" ")[0])
             if not url or not IMG_EXT_RE.search(url):
                 continue
-            if CHROME_RE.search(url):
-                continue
-            if "/f/" not in url:
-                continue  # fuera de /f/ solo hay assets del tema
 
-            original, preset = image_urls(url)
+            es_icono_png_svg = ICON_EXT_RE.search(url) and CHROME_RE.search(url)
+            if es_icono_png_svg:
+                if ICON_JUNK_RE.search(url):
+                    continue  # sprites con fragment (#simbolo) o placeholders
+            else:
+                if CHROME_RE.search(url):
+                    continue
+                if "/f/" not in url:
+                    continue  # fuera de /f/ solo hay assets del tema
+
+            original = urljoin(BASE_URL, url) if es_icono_png_svg else None
+            preset = original
+            if not es_icono_png_svg:
+                original, preset = image_urls(url)
             if original in vistas:
                 continue
             vistas.add(original)
 
-            # Sin card no hay cid: se usa la ruta del fichero, que es
-            # estable y unica, para poder deduplicar entre ejecuciones.
-            ruta = original.split("/f/", 1)[-1]
+            # Sin card no hay cid: se usa la ruta del fichero (siempre la
+            # misma en cada carga de la home, para un logo/icono fijo), que
+            # es estable y unica -- already_seen() la dedupe entre corridas
+            # sin volver a subir el mismo icono cada vez.
+            ruta = original.split(BASE_URL, 1)[-1].lstrip("/")
             nombre = os.path.basename(ruta.split("?")[0])
             items.append({
                 "cid": "img:" + ruta,
                 "title": os.path.splitext(nombre)[0].replace("_", " "),
                 "url": "", "image": original, "image_fallback": preset,
-                "content_type": "image", "show": "",
-                "topic": TOPIC_OTHER, "_source": source,
+                "content_type": "icon" if es_icono_png_svg else "image",
+                "show": "",
+                "topic": TOPIC_ICONS if es_icono_png_svg else TOPIC_OTHER,
+                "_source": source,
             })
     return items
 
@@ -872,6 +899,8 @@ def build_caption(item):
         tags.append("#Articulo")
     elif item["content_type"].startswith("video"):
         tags.append("#Video")
+    elif item["content_type"] == "icon":
+        tags.append("#Icono")
     if tags:
         cap += "\n" + " ".join(tags)
     if item["url"]:
@@ -881,12 +910,16 @@ def build_caption(item):
 
 async def publish(client, group, topic_id, path, item):
     """Sube la imagen al tema correspondiente, respetando los FloodWait."""
+    # Telegram no acepta SVG como foto embebida (solo Telethon lo intentaria
+    # igual y el servidor lo rechaza o lo entrega sin preview): los iconos
+    # van como documento, ademas preserva el archivo original sin recomprimir.
+    as_doc = item["content_type"] == "icon"
     for _ in range(MAX_RETRIES):
         try:
             await client.send_file(
                 group, str(path), caption=build_caption(item),
                 parse_mode="html", reply_to=topic_id,
-                force_document=False)
+                force_document=as_doc)
             return True
         except FloodWaitError as e:
             log.warning("FloodWait al publicar: %ds", e.seconds)
