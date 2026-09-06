@@ -1122,10 +1122,16 @@ async def publish_gallery(client, group, topics, session, conn, item,
 
 # ==========================================================================
 
-async def run_once(dry_run=False):
-    """Una pasada completa. Devuelve el numero de publicaciones."""
+async def run_once(dry_run=False, client=None):
+    """Una pasada completa. Devuelve el numero de publicaciones.
+
+    `client`: si se pasa un TelegramClient ya conectado (run_backfill_all lo
+    comparte para intercalar novedades sin abrir una segunda conexion sobre
+    el mismo archivo de sesion), se reusa y NO se desconecta al salir; si
+    no, esta funcion crea y cierra el suyo, como antes.
+    """
     conn = db_connect()
-    client = None
+    own_client = client is None
     try:
         purge_old(conn)
         first_run = is_first_run(conn)
@@ -1195,7 +1201,8 @@ async def run_once(dry_run=False):
                      len(objetivo), len(ordenados) - len(objetivo))
             return 0
 
-        client = await get_client()
+        if client is None:
+            client = await get_client()
         group = await ensure_group(client)
         # Se crean todos los temas por adelantado y en orden fijo: Telegram
         # no permite reordenarlos despues.
@@ -1232,7 +1239,7 @@ async def run_once(dry_run=False):
         return enviados
     finally:
         conn.close()
-        if client:
+        if own_client and client:
             await client.disconnect()
 
 
@@ -1449,29 +1456,54 @@ async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
             await client.disconnect()
 
 
+# Cada cuantas tandas de backfill se intercala una pasada de run_once
+# (novedades del dia a dia, ver run_backfill_all). run_backfill/run_photos
+# solo avanzan hacia paginas mas altas y nunca vuelven a la 0: sin esto, lo
+# que WWE.com publique mientras el backfill esta en curso no se capturaria
+# nunca, porque el backfill ya la paso de largo para cuando llega.
+NOVEDADES_CADA_TANDAS = 20
+
+
 async def run_backfill_all(dry_run=False):
     """
     Corre portada y galerias historicas HASTA EL FINAL de ambas, alternando
-    tandas en el mismo proceso con un solo TelegramClient compartido.
+    tandas en el mismo proceso con un solo TelegramClient compartido, e
+    intercala cada NOVEDADES_CADA_TANDAS vueltas una pasada de run_once para
+    cubrir tambien lo que WWE.com publica mientras tanto.
 
     Pensado para el unico always-on task disponible en PythonAnywhere
     Developer: un solo comando que deja corriendo el volcado completo de
     /homepage (--backfill) y /photos (--photos) sin intervencion, en vez de
-    necesitar dos always-on tasks (uno por modo) que el plan no tiene.
+    necesitar tareas separadas que el plan no tiene espacio para correr a
+    la vez.
 
-    No se usa asyncio.gather para correrlas en paralelo real porque cada
-    modo abre su propio TelegramClient, y dos clientes escribiendo a la vez
-    sobre el mismo archivo .session (una base SQLite interna de Telethon)
-    puede dar 'database is locked'. En vez de eso se alterna: una tanda
-    chica de portada, una tanda chica de fotos, y se repite. El cuello de
-    botella real es la subida a Telegram (~0.4 MB/s medido, ver
-    fast_upload.py), no la CPU, asi que alternar en vez de paralelizar de
-    verdad no cuesta velocidad total apreciable.
+    Por que hace falta intercalar run_once: run_backfill avanza de pagina 0
+    hacia arriba y NUNCA vuelve a revisar paginas ya pasadas. Como la pagina
+    0 del feed es siempre "lo mas reciente", todo lo que se corre hacia
+    paginas mas altas por contenido nuevo publicado despues de que el
+    backfill ya avanzo de esas paginas se identifica igual por su cid (id
+    de nodo Drupal, estable, no la posicion) asi que no se duplica -- pero
+    algo COMPLETAMENTE nuevo que aparece en la pagina 0 mientras el backfill
+    esta en la pagina 872, por ejemplo, nunca se veria si nada vuelve a
+    mirar la pagina 0. run_once si la mira (recorre MAX_PAGES paginas desde
+    la 0 en cada pasada), por eso se intercala.
+
+    No se usa asyncio.gather para correr los modos en paralelo real porque
+    cada uno abre su propio TelegramClient, y dos clientes escribiendo a la
+    vez sobre el mismo archivo .session (una base SQLite interna de
+    Telethon) puede dar 'database is locked'. En vez de eso se alterna: una
+    tanda chica de cada modo, y se repite. El cuello de botella real es la
+    subida a Telegram (~0.4 MB/s medido, ver fast_upload.py), no la CPU,
+    asi que alternar en vez de paralelizar de verdad no cuesta velocidad
+    total apreciable.
 
     Reanudable como los modos sueltos: el progreso de cada uno vive en sus
     propias claves de la tabla 'backfill' ('page'/'done' y
     'photos_page'/'photos_done'), asi que cortar esto con Ctrl+C o que se
-    caiga el always-on task no pierde avance.
+    caiga el always-on task no pierde avance. run_once no tiene una nocion
+    de "terminado" (siempre hay novedades por revisar), asi que se sigue
+    intercalando incluso despues de que portada y galerias historicas ya
+    llegaron al final de su archivo.
     """
     client = None
     try:
@@ -1486,9 +1518,21 @@ async def run_backfill_all(dry_run=False):
             photos_done = bf_get(c, "photos_done") == "1"
             c.close()
 
+            if tanda % NOVEDADES_CADA_TANDAS == 0:
+                try:
+                    log.info("Revisando novedades del dia a dia (tanda #%d)...", tanda)
+                    await run_once(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error revisando novedades (#%d); sigo.", tanda)
+
             if feed_done and photos_done:
-                log.info("Backfill completo: portada y galerias llegaron al final.")
-                break
+                # El historico ya termino, pero las novedades siguen
+                # llegando: no se corta, solo se espacian mas las vueltas
+                # para no golpear el sitio sin necesidad.
+                log.info("Backfill historico completo; sigo revisando "
+                         "novedades cada %d tandas.", NOVEDADES_CADA_TANDAS)
+                await asyncio.sleep(60.0)
+                continue
 
             if not feed_done:
                 try:
