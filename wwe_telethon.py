@@ -552,16 +552,36 @@ def fetch_gallery(session, nid, per_page=200):
             break
 
         for ph in crudas:
-            # photo_hires cuando existe; si no, la normal.
-            markup = (ph.get("photo_hires") or {}).get("photo") or ph.get("photo", "")
-            m = re.search(r'src="([^"]+)"', markup)
-            if not m:
+            # photo_hires y photo son URLs DISTINTAS del JSON (no dos
+            # tamanos de la misma imagen): si la de alta calidad da 503 (a
+            # veces no existe en el servidor de WWE.com), photo es el
+            # fallback real, no otro preset de la misma URL rota. Antes se
+            # derivaban original Y fallback de photo_hires nada mas, asi
+            # que el "fallback" terminaba siendo la misma imagen caida.
+            markup_hires = (ph.get("photo_hires") or {}).get("photo") or ""
+            markup_normal = ph.get("photo", "")
+            m_hires = re.search(r'src="([^"]+)"', markup_hires)
+            m_normal = re.search(r'src="([^"]+)"', markup_normal)
+            if not m_hires and not m_normal:
                 continue
-            original, preset = image_urls(m.group(1))
+
+            # image_urls() pela el preset (/f/styles/<x>/public/ -> /f/)
+            # para pedir la version sin recomprimir; se aplica a la mejor
+            # URL disponible (hires si existe) y el fallback usa la otra
+            # URL del JSON tal cual, sin pelar preset -- si el original de
+            # alta calidad no existe, es mas probable que el preset normal
+            # si funcione que otro preset derivado de la misma URL rota.
+            if m_hires:
+                original, _ = image_urls(m_hires.group(1))
+                fallback = (urljoin(BASE_URL, html.unescape(m_normal.group(1)).replace("\\/", "/"))
+                           if m_normal else original)
+            else:
+                original, fallback = image_urls(m_normal.group(1))
+
             fotos.append({
                 "fid": str(ph.get("fid") or ""),
                 "image": original,
-                "image_fallback": preset,
+                "image_fallback": fallback,
                 "caption": html.unescape(
                     re.sub(r"<[^>]+>", " ", ph.get("caption") or "")).strip(),
             })
