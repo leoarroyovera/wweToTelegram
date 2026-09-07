@@ -10,11 +10,15 @@ se crean solos en la primera ejecución.
 ```
 WWE (supergrupo privado con temas)
 ├── 📰 Articulos
-├── ⭐ Eventos        WrestleMania, SummerSlam, Royal Rumble…
+├── ⭐ Eventos        PLEs: WrestleMania, SummerSlam, Money in the Bank… + /events/
 ├── 🔴 Raw
 ├── 🔵 SmackDown
 ├── 🟡 NXT
-└── 📺 Otros          WWE Now, Top 10, AAA
+├── 📻 Otros Shows    Raw Talk, The Bump, 205 Live, NXT UK…
+├── 📺 Otros          WWE Now, Top 10, AAA, superstars sueltos sin show
+├── 🖼️ Iconos
+├── 🤼 Superstars     fotos de perfil de /superstars
+└── 🎬 Shows          hub estatico de /shows
 ```
 
 ## Configuración
@@ -38,19 +42,20 @@ python wwe_telethon.py --login
 Pide teléfono, el código que llega por Telegram y la clave 2FA si la tienes.
 Queda en `wwe_session.session` y crea el supergrupo con sus seis temas.
 
-## Dos ejecuciones independientes
+## Cinco ejecuciones independientes
 
-| | Portada | Galerias |
-|---|---|---|
-| Comando | `wwe_telethon.py` | `wwe_telethon.py --photos` |
-| Fuente | `/homepage` (scroll infinito) **+ imagenes sueltas de la home** | `/photos`, el listado propio de galerias |
-| Publica | una imagen por item | album de 10 + ZIP por galeria |
-| Progreso | `page` | `photos_page` |
-| Lock | `wwe_telethon.feed.lock` | `wwe_telethon.photos.lock` |
+| | Portada | Galerias | Superstars | Shows | Events |
+|---|---|---|---|---|---|
+| Comando | `wwe_telethon.py` | `--photos` | `--superstars` | `--shows` | `--events` |
+| Fuente | `/homepage` (scroll infinito) **+ imagenes sueltas de la home** | `/photos`, listado propio de galerias | `/superstars` (scroll infinito) | `/shows`, hub estatico (9 shows fijos) | `/events/`, landing geolocalizada de proximos eventos |
+| Publica | una imagen por item | ZIP + todas las fotos en albumes de 10 por galeria | una foto de perfil por luchador | una imagen por show | una imagen por evento |
+| Progreso | `page` | `photos_page` | `superstars_page` | ninguno (revisa todo cada vez) | ninguno (revisa todo cada vez) |
+| Lock | `wwe_telethon.feed.lock` | `wwe_telethon.photos.lock` | `wwe_telethon.superstars.lock` | `wwe_telethon.shows.lock` | `wwe_telethon.events.lock` |
+| Archivo historico | si, ~22.200 items | si, ~1.600 galerias | si, paginado igual que portada | no: 9 shows fijos | no: solo vigilancia de novedades |
 
-Cada una tiene su propio lock y su propio progreso, asi que **pueden correr a
-la vez** sin pisarse. Comparten el indice `seen`, de modo que nada se publica
-dos veces.
+Cada una tiene su propio lock, asi que **pueden correr a la vez** sin
+pisarse. Todas comparten el indice `seen`, de modo que nada se publica dos
+veces sin importar por que modo entro primero.
 
 
 ## Uso
@@ -59,8 +64,11 @@ dos veces.
 python wwe_telethon.py --dry-run    # scrapea y ordena sin tocar Telegram
 python wwe_telethon.py              # PORTADA: publica lo nuevo
 python wwe_telethon.py --photos     # GALERIAS: recorre /photos
+python wwe_telethon.py --superstars # SUPERSTARS: recorre /superstars
+python wwe_telethon.py --shows      # SHOWS: revisa el hub /shows
+python wwe_telethon.py --events     # EVENTS: revisa /events/ (novedades)
 python wwe_telethon.py --loop       # bucle cada 30 min (always-on task)
-python wwe_telethon.py --status     # progreso de ambos modos
+python wwe_telethon.py --status     # progreso de todos los modos
 ```
 
 Es **reanudable**: lo ya publicado vive en `wwe_seen.sqlite3`, así que nunca se
@@ -91,6 +99,24 @@ tandas con `--limit`.
 > El backfill convive con el modo normal: comparten el índice `seen`, así que
 > lo que ya publicó la vigilancia no se repite, ni al revés.
 
+`--superstars` funciona igual, con su propio progreso (`superstars_page`):
+
+```
+python wwe_telethon.py --superstars --limit 5   # una tanda de 5 páginas
+python wwe_telethon.py --superstars             # hasta el final del listado
+```
+
+`--shows` y `--events` no tienen progreso por página porque no son un
+archivo histórico paginable: cada pasada revisa el listado entero (9 shows
+fijos, o los eventos próximos de la landing geolocalizada) y el índice
+`seen` evita republicar lo ya visto.
+
+```
+python wwe_telethon.py --backfill-all   # portada + galerias + superstars
+                                         # hasta el final de las tres,
+                                         # intercalando shows y events
+```
+
 ## Opciones (.env)
 
 | Variable | Defecto | Efecto |
@@ -104,7 +130,7 @@ tandas con `--limit`.
 | `WWE_INTERVAL_MINUTES` | `30` | Solo en modo `--loop` |
 | `WWE_RETENTION_DAYS` | `45` | Días de historial antes de purgar |
 | `WWE_LOOSE_IMAGES` | `1` | Recoger también las imágenes sueltas de la home |
-| `WWE_ALBUM_MAX` | `10` | Fotos del álbum de muestra (tope de Telegram: 10) |
+| `WWE_ALBUM_MAX` | `10` | Fotos por álbum de galería (tope de Telegram: 10) |
 
 `WWE_MAX_PAGES` solo dice **cuánto mira** cada pasada (10 items por página);
 `WWE_MAX_SEND` dice **cuánto publica**. Lo que se recoge pero no cabe en el
@@ -293,12 +319,19 @@ tema por galería tampoco vale — hay **~1.600 galerías** en el archivo
 histórico (medido: 7,2 % de los items del feed), y esa lista de temas dejaría
 el supergrupo inservible.
 
-La solución: cada galería es **un solo post** en el tema de su show, en su
-posición cronológica:
+La solución: cada galería ocupa **varias posiciones seguidas** en el tema de
+su show, en su lugar cronológico:
 
-1. un **álbum de 10 fotos** — el máximo que Telegram agrupa en un mensaje —
-   con el pie que lleva título, número de fotos, peso y enlace;
-2. el **ZIP con todas** las fotos en calidad original, justo debajo.
+1. el **ZIP con todas** las fotos en calidad original, primero — así ya
+   existe su mensaje (y el enlace a él) para el paso 2;
+2. **todas las fotos**, repartidas en tantos álbumes de 10 como haga falta
+   (el máximo que Telegram agrupa en un mensaje). Cada álbum lleva su pie
+   con título, número de parte y un enlace de vuelta al ZIP, así que
+   cualquiera de ellos —no solo el primero— permite llegar a la galería
+   completa en calidad original.
+
+Antes solo se subía un álbum de muestra de 10 fotos; ahora se suben todas,
+sin perder la referencia al ZIP.
 
 Dentro del ZIP los archivos van numerados (`001_`, `002_`…) para conservar el
 orden de la galería, que el nombre original no siempre respeta. Se comprime
@@ -308,6 +341,61 @@ CPU sin ganar tamaño.
 Ejemplos reales: 18 fotos → ZIP de 7,5 MB; 98 fotos → ZIP de 63 MB. Muy por
 debajo del límite de 2 GB de Telethon, así que no hacen falta volúmenes
 partidos como en C90.
+
+## Superstars, Shows y Events
+
+Verificado contra el sitio en vivo (2026-09-06).
+
+### `/superstars`: misma vista Drupal que la portada
+
+Otra vista de `views_infinite_scroll`, distinto nombre:
+`current_superstar`/`block_1`. Pagina exactamente igual que `/homepage`
+(mismo endpoint `/views/ajax`, mismo truco de leer el `view_dom_id` en vivo):
+verificado **0 % de solapamiento** entre páginas, 30 luchadores por página.
+
+Cada fila trae el nombre y una foto de perfil cuadrada en un `<picture>`. El
+listado no expone ningún id numérico (a diferencia de las feed-cards, que
+llevan `cid`), así que el identificador estable es el slug de
+`/superstars/<slug>`.
+
+La foto de perfil admite el mismo truco de siempre
+(`/f/styles/<preset>/public/` → `/f/`), pero aquí el original dio **503
+intermitente** en las pruebas (nada raro: es lo que ya maneja
+`download_to()` con su reintento al preset). El preset de respaldo más
+grande disponible es `wwe_1_1_540__composite` (540×540); uno más grande
+(`..._xl__composite`) no existe para este campo y da 404.
+
+### `/shows`: hub estático, sin paginación
+
+A diferencia de `/homepage` y `/photos`, `/shows` **no** es una vista
+`views_infinite_scroll`: es una página fija con 9 shows (Raw, SmackDown,
+NXT, Sunday Night's Main Event, Money in the Bank, Survivor Series
+WarGames, AAA, WWE Evolve, NXT PLE), cada uno con un hero y un logo que
+comparten el mismo enlace `/shows/<slug>`. No hace falta AJAX ni progreso
+por página: `run_shows()` revisa el HTML entero cada vez y el índice `seen`
+evita republicar los mismos 9.
+
+Varios de estos shows (los que aún no tienen hero propio) comparten una
+imagen placeholder genérica (`Show_Sub_Header`) — es así en el sitio, no un
+fallo del scraper.
+
+### `/events/`: landing geolocalizada, sin archivo histórico
+
+`/events/` responde **302** y redirige (Fastly resuelve la geo por IP) a
+`/events/results/all-events/all-dates/<lat>/<lng>/<ciudad>/<país>`. Ahí no
+hay scroll infinito ni pager: es una landing de "próximos eventos" con un
+puñado de tarjetas (8 en la prueba), cada una con fecha, lugar y enlace a
+`/event/<slug>`. No es un archivo histórico paginable como `/photos`, así
+que `run_events()` no tiene noción de "completo": solo vigila novedades,
+igual que el modo normal de portada.
+
+El cid se arma con el slug de `/event/<slug>`; cuando un evento pasa y deja
+de aparecer en la landing, ya quedó marcado en `seen` desde la primera vez
+que se vio, así que no se pierde ni se reprocesa.
+
+Las imágenes de evento también resuelven con el mismo truco `/f/<ruta>`:
+verificado un caso real, 1,1 MB el original contra 75 KB del preset
+`large`.
 
 ## Orden de publicación
 
@@ -345,9 +433,65 @@ Al depender del markup del tema, se rompe si WWE cambia:
 - el atributo `data-tracking-label` con `cid=` y `content_type=`
 - el nombre de la vista `wwe_homepage` / display `block_1`
 - la ruta del original `/f/<ruta>` (hay fallback al preset `wwe_16_9_xl_r`)
+- el nombre de la vista `current_superstar` / display `block_1` (`--superstars`)
+- la estructura de fila `.views-row` con el enlace y el `<picture>` debajo
+  (`--superstars`)
+- las clases `b-link` / `field--name-field-shows-wwe` del hub `/shows`
+  (`--shows`)
+- las clases `events-upcoming-card` y `event-breaker--meta-location` de la
+  landing de eventos (`--events`)
 
-El `view_dom_id` se lee en vivo de la home en cada ejecución, así que ese sí se
-adapta solo.
+El `view_dom_id` se lee en vivo de cada página en cada ejecución, así que ese
+sí se adapta solo.
+
+## Barrido de cobertura (2026-09-06)
+
+Auditoría de todas las rutas scrapeadas para detectar imágenes reales del
+sitio que el scraper detecta pero nunca termina de publicar.
+
+**Sin pérdidas de imagen por parseo**: verificado 50/50 cards del feed en 5
+páginas seguidas (sin fallos por falta de `cid` o de imagen), 25/25 fotos de
+una galería de ejemplo, y 30/30 luchadores de `/superstars`. Todas las rutas
+intentan primero el original sin recomprimir y caen al mejor preset
+disponible si el original falla (`download_to()`), nunca al revés.
+
+**Hallazgo real — huérfanos permanentes**: `already_seen()` marcaba como
+"visto" cualquier fila de `seen`, publicada o no. Un item que el scraper
+detectaba pero que quedaba fuera del límite de esa pasada
+(`WWE_MAX_SEND`/`WWE_FIRST_RUN_SEND`, o un backfill cortado a mitad de
+página) se registraba con `sent=0` y quedaba bloqueado **para siempre**: el
+feed lo seguía trayendo en cada pasada futura, pero `already_seen()` ya lo
+descartaba antes de intentarlo de nuevo. Medido sobre el índice en
+producción: **72 items reales** (60 imágenes sueltas de la home + 12 videos
+del archivo histórico) atrapados así.
+
+Corregido: `already_seen()` ahora solo cuenta `sent=1` como visto, así que
+cualquier pasada que vuelva a encontrar un `sent=0` en el feed lo reintenta
+hasta que se publique. `record()` preserva el `first_seen` original en un
+reintento (para que `purge_old()` no pierda la cuenta de antigüedad), y
+`purge_old()` ya no necesita distinguir `sent` porque una fila `sent=0`
+purgada simplemente vuelve a verse como nueva. No hace falta limpiar a mano
+los 72 huérfanos existentes: la próxima pasada normal (o el backfill, cuando
+vuelva a pasar por esas páginas) ya los recoge solo.
+
+**Reorganización de temas**: medido el campo `show` sobre las ~10.400 filas
+indexadas, el tema `Otros` concentraba 4.224 items (el más grande, muy por
+delante de Raw con 1.751) porque agrupaba sin distinción: shows menores
+mapeados (`wwe`, `wwenow`, `wwetop10`, `aaa`), sub-shows recurrentes sin
+mapear (Raw Talk, 205 Live, The Bump, NXT UK...), Premium Live Events sin
+mapear (Money in the Bank, Elimination Chamber, Crown Jewel, Hell in a
+Cell...) y slugs de superstars individuales (`romanreigns`, `undertaker`,
+`johncena`...). Se agregaron ~30 shows/PLEs al mapeo `SHOW_TO_TOPIC`: los
+PLEs van a `Eventos` (pasó de 371 a 771 items) y los sub-shows recurrentes a
+un tema nuevo, `Otros Shows` (699 items). `Otros` bajó a 3.187, y lo que le
+queda es justamente lo que no encaja en ningún show reconocible: contenido
+de superstars individuales y material sin `show`.
+
+> Los ~10.300 items ya publicados con el mapeo anterior **no se
+> reclasifican retroactivamente** — quedan en el tema donde ya se enviaron.
+> El nuevo mapeo solo aplica a partir de la próxima publicación. Si se
+> reinicia el volcado completo desde cero (ver más abajo), sí sale todo
+> clasificado con las categorías nuevas desde el principio.
 
 ## Problemas frecuentes
 

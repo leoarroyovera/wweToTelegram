@@ -147,8 +147,20 @@ PHOTOS_VIEW = "photos"
 PHOTOS_DISPLAY = "block_1"
 PHOTOS_PATH = "/photos"
 
+# Listado de luchadores (/superstars): misma vista Drupal, misma paginacion.
+SUPERSTARS_VIEW = "current_superstar"
+SUPERSTARS_DISPLAY = "block_1"
+SUPERSTARS_PATH = "/superstars"
+
+SHOWS_URL = BASE_URL + "/shows"
+EVENTS_URL = BASE_URL + "/events/"
+
 # Preset de respaldo si el original no sirve: 1920x1080, ~380 KB.
 IMAGE_STYLE = "wwe_16_9_xl_r"
+# Idem para la foto de perfil de un luchador (cuadrada): el original da 503
+# a veces (frio de cache en Fastly, no ausente); este preset es el mas
+# grande disponible en /superstars, 540x540 sin recomprimir de mas.
+SUPERSTAR_IMAGE_STYLE = "wwe_1_1_540__composite"
 
 WORK_DIR = Path(os.environ.get("WWE_WORK_DIR", ROOT / "work"))
 DB_PATH = os.environ.get("WWE_DB_PATH", str(ROOT / "wwe_seen.sqlite3"))
@@ -174,19 +186,56 @@ TOPIC_ARTICLES = "Articulos"
 TOPIC_EVENTS = "Eventos"
 TOPIC_OTHER = "Otros"
 TOPIC_ICONS = "Iconos"
+TOPIC_SUPERSTARS = "Superstars"
+TOPIC_SHOWS = "Shows"
+# Sub-shows recurrentes que no son PLE ni el programa principal de un show
+# grande (Raw Talk, WWE 205 Live, The Bump...): antes cabian todos en Otros
+# junto con slugs de superstars individuales, dejandolo con mas de 4.200
+# items. Tema propio para que Otros vuelva a ser solo lo que de verdad no
+# encaja en ningun lado (superstars sueltos, contenido sin show).
+TOPIC_SHOWS_MENORES = "Otros Shows"
 
 TOPICS_ORDER = [TOPIC_ARTICLES, TOPIC_EVENTS, "Raw", "SmackDown", "NXT",
-                TOPIC_OTHER, TOPIC_ICONS]
+                TOPIC_SHOWS_MENORES, TOPIC_OTHER, TOPIC_ICONS,
+                TOPIC_SUPERSTARS, TOPIC_SHOWS]
 
 # Slug de show (clase CSS de la card) -> tema.
 SHOW_TO_TOPIC = {
     "raw": "Raw",
     "smackdown": "SmackDown",
     "wwenxt": "NXT", "nxt": "NXT",
-    "wrestlemania": TOPIC_EVENTS, "summerslam": TOPIC_EVENTS,
-    "royalrumble": TOPIC_EVENTS, "survivorseries": TOPIC_EVENTS,
     "wwe": TOPIC_OTHER, "wwenow": TOPIC_OTHER,
     "wwetop10": TOPIC_OTHER, "aaa": TOPIC_OTHER,
+
+    # Premium Live Events (PLEs): todos al tema Eventos, sea cual sea su
+    # tamano o antiguedad. wrestlemania/summerslam/royalrumble/
+    # survivorseries ya estaban; el resto se detecto midiendo el volumen
+    # real de 'show' en el archivo historico (>=10 items sin mapear).
+    "wrestlemania": TOPIC_EVENTS, "summerslam": TOPIC_EVENTS,
+    "royalrumble": TOPIC_EVENTS, "survivorseries": TOPIC_EVENTS,
+    "survivorserieswargames": TOPIC_EVENTS, "eliminationchamber": TOPIC_EVENTS,
+    "wwecrownjewel": TOPIC_EVENTS, "moneyinthebank": TOPIC_EVENTS,
+    "backlash": TOPIC_EVENTS, "sundaynightsmainevent": TOPIC_EVENTS,
+    "wwehellinacell": TOPIC_EVENTS, "wweclashatthecastle": TOPIC_EVENTS,
+    "nightofchampions": TOPIC_EVENTS, "extremerules": TOPIC_EVENTS,
+    "wweclashofchampions": TOPIC_EVENTS, "wwepayback": TOPIC_EVENTS,
+    "wweday1": TOPIC_EVENTS, "wwefastlane": TOPIC_EVENTS,
+    "nxtpremiumliveevent": TOPIC_EVENTS,
+
+    # Sub-shows recurrentes: programas regulares propios, distintos del
+    # show principal (Raw/SmackDown/NXT) pero con volumen suficiente para
+    # no perderse dentro de Otros junto a slugs de superstars individuales.
+    "wwenetwork": TOPIC_SHOWS_MENORES, "rawtalk": TOPIC_SHOWS_MENORES,
+    "wwecommunity": TOPIC_SHOWS_MENORES, "wwetalkingsmack": TOPIC_SHOWS_MENORES,
+    "wwe205live": TOPIC_SHOWS_MENORES, "wwesthebump": TOPIC_SHOWS_MENORES,
+    "nxtuk": TOPIC_SHOWS_MENORES, "thenewdayfeelthepower": TOPIC_SHOWS_MENORES,
+    "wweafterthebell": TOPIC_SHOWS_MENORES,
+    "steveaustinsbrokenskullsessions": TOPIC_SHOWS_MENORES,
+    "coreygraves": TOPIC_SHOWS_MENORES, "wwehalloffame": TOPIC_SHOWS_MENORES,
+    "wweplayback": TOPIC_SHOWS_MENORES, "mckenziemitchell": TOPIC_SHOWS_MENORES,
+    "nxtlevelup": TOPIC_SHOWS_MENORES, "wwemattel": TOPIC_SHOWS_MENORES,
+    "mizandmrs": TOPIC_SHOWS_MENORES, "wwepopquestion": TOPIC_SHOWS_MENORES,
+    "vicjoseph": TOPIC_SHOWS_MENORES, "tributetothetroops": TOPIC_SHOWS_MENORES,
 }
 
 # Orden de publicacion dentro de cada pasada. Menor = antes.
@@ -199,8 +248,25 @@ TYPE_PRIORITY = {"article": 0, "video": 1, "video_playlist": 2,
                  "gallery": 2, "image": 3, "icon": 4, "unknown": 5}
 SHOW_PRIORITY = {
     "wrestlemania": 0, "summerslam": 0, "royalrumble": 0, "survivorseries": 0,
+    # Resto de PLEs: mismo rango de prioridad que los cuatro grandes de
+    # arriba, van todos al tema Eventos y el orden entre ellos ya lo da la
+    # posicion original del feed (ver sort_for_channel).
+    "survivorserieswargames": 0, "eliminationchamber": 0, "wwecrownjewel": 0,
+    "moneyinthebank": 0, "backlash": 0, "sundaynightsmainevent": 0,
+    "wwehellinacell": 0, "wweclashatthecastle": 0, "nightofchampions": 0,
+    "extremerules": 0, "wweclashofchampions": 0, "wwepayback": 0,
+    "wweday1": 0, "wwefastlane": 0, "nxtpremiumliveevent": 0,
     "wwe": 1, "raw": 2, "smackdown": 2,
-    "wwenxt": 3, "nxt": 3, "wwenow": 4, "wwetop10": 5, "aaa": 6,
+    "wwenxt": 3, "nxt": 3,
+    # Sub-shows recurrentes: por debajo del show principal que los origina,
+    # por delante del resto (DEFAULT_SHOW_PRIORITY).
+    "wwenetwork": 3, "rawtalk": 3, "wwecommunity": 3, "wwetalkingsmack": 3,
+    "wwe205live": 3, "wwesthebump": 3, "nxtuk": 3, "thenewdayfeelthepower": 3,
+    "wweafterthebell": 3, "steveaustinsbrokenskullsessions": 3,
+    "coreygraves": 3, "wwehalloffame": 3, "wweplayback": 3,
+    "mckenziemitchell": 3, "nxtlevelup": 3, "wwemattel": 3, "mizandmrs": 3,
+    "wwepopquestion": 3, "vicjoseph": 3, "tributetothetroops": 3,
+    "wwenow": 4, "wwetop10": 5, "aaa": 6,
 }
 DEFAULT_SHOW_PRIORITY = 4
 
@@ -210,6 +276,34 @@ SHOW_LABEL = {
     "wwetop10": "Top10", "aaa": "AAA",
     "wrestlemania": "WrestleMania", "summerslam": "SummerSlam",
     "royalrumble": "RoyalRumble", "survivorseries": "SurvivorSeries",
+    # Shows del hub /shows que no aparecen en el feed de portada.
+    "snme": "Sunday Night's Main Event", "nxtple": "NXT PLE",
+    "moneyinthebank": "Money in the Bank",
+    "survivor-series-wargames": "Survivor Series WarGames",
+    "wwe-evolve": "WWE Evolve",
+    # PLEs detectados en el archivo historico, sin mapear antes.
+    "survivorserieswargames": "Survivor Series WarGames",
+    "eliminationchamber": "Elimination Chamber",
+    "wwecrownjewel": "Crown Jewel", "backlash": "Backlash",
+    "sundaynightsmainevent": "Sunday Night's Main Event",
+    "wwehellinacell": "Hell in a Cell",
+    "wweclashatthecastle": "Clash at the Castle",
+    "nightofchampions": "Night of Champions", "extremerules": "Extreme Rules",
+    "wweclashofchampions": "Clash of Champions", "wwepayback": "Payback",
+    "wweday1": "Day 1", "wwefastlane": "Fastlane",
+    "nxtpremiumliveevent": "NXT PLE",
+    # Sub-shows recurrentes.
+    "wwenetwork": "WWE Network", "rawtalk": "Raw Talk",
+    "wwecommunity": "WWE Community", "wwetalkingsmack": "Talking Smack",
+    "wwe205live": "205 Live", "wwesthebump": "The Bump",
+    "nxtuk": "NXT UK", "thenewdayfeelthepower": "The New Day: Feel the Power",
+    "wweafterthebell": "After the Bell",
+    "steveaustinsbrokenskullsessions": "Broken Skull Sessions",
+    "coreygraves": "Corey Graves", "wwehalloffame": "Hall of Fame",
+    "wweplayback": "Playback", "mckenziemitchell": "McKenzie Mitchell",
+    "nxtlevelup": "NXT Level Up", "wwemattel": "WWE Mattel",
+    "mizandmrs": "Miz & Mrs.", "wwepopquestion": "Pop Question",
+    "vicjoseph": "Vic Joseph", "tributetothetroops": "Tribute to the Troops",
 }
 
 log = logging.getLogger("wwe")
@@ -316,21 +410,50 @@ def is_first_run(conn):
 
 
 def already_seen(conn, cid):
-    return conn.execute("SELECT 1 FROM seen WHERE cid=?", (cid,)).fetchone() is not None
+    """
+    Solo cuenta como visto lo que YA SE PUBLICO (sent=1).
+
+    Antes cualquier fila en 'seen' bloqueaba el reintento, aunque fuera un
+    item que se indexo pero nunca se subio por quedar fuera del limite de
+    esa pasada (MAX_SEND_PER_RUN/FIRST_RUN_SEND, o un backfill cortado a
+    medio camino). Eso los dejaba huerfanos para siempre: el feed los sigue
+    trayendo, pero already_seen() los descartaba antes de intentarlos de
+    nuevo. Con sent=0 excluido de este chequeo, la proxima pasada que los
+    vuelva a ver los reintenta hasta que se publiquen de verdad.
+    """
+    r = conn.execute("SELECT sent FROM seen WHERE cid=?", (cid,)).fetchone()
+    return r is not None and r[0] == 1
 
 
 def record(conn, item, sent):
+    """
+    Guarda el resultado de intentar publicar un item.
+
+    first_seen se preserva si ya existia una fila previa (un reintento tras
+    un sent=0 no debe resetear su fecha de primera vista, o purge_old()
+    nunca lo alcanzaria si el reintento lo sigue posponiendo indefinidamente).
+    """
+    previo = conn.execute("SELECT first_seen FROM seen WHERE cid=?",
+                          (item["cid"],)).fetchone()
+    first_seen = previo[0] if previo else datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR REPLACE INTO seen "
         "(cid,title,url,image,content_type,show,topic,first_seen,sent) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (item["cid"], item["title"], item["url"], item["image"],
          item["content_type"], item["show"], item["topic"],
-         datetime.now(timezone.utc).isoformat(), 1 if sent else 0))
+         first_seen, 1 if sent else 0))
     conn.commit()
 
 
 def purge_old(conn):
+    """
+    Purga filas de mas de RETENTION_DAYS, sent=1 o no.
+
+    Una fila sent=0 purgada no se pierde: al desaparecer de 'seen',
+    already_seen() vuelve a verla como no vista y una pasada normal que
+    todavia la encuentre en el feed la reintenta desde cero.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
     cur = conn.execute("DELETE FROM seen WHERE first_seen < ?", (cutoff,))
     conn.commit()
@@ -492,6 +615,135 @@ def parse_photos_page(markup):
             "content_type": "gallery", "show": show,
         }
         it["topic"] = topic_for(it)
+        items.append(it)
+    return items
+
+
+SUPERSTAR_ROW_RE = re.compile(
+    r'<div class="views-row">.*?href="(/superstars/[a-z0-9-]+)"[^>]*>'
+    r'(.*?)</a>.*?</picture>', re.S)
+
+
+def parse_superstars_page(markup):
+    """
+    Luchadores del listado /superstars.
+
+    Misma vista Drupal que la portada (views_infinite_scroll), otro nombre:
+    current_superstar/block_1. Cada fila trae el nombre (primer <a>) y, mas
+    abajo, un <picture> con la foto de perfil cuadrada. El slug de la URL
+    (unico y estable entre ejecuciones) hace de cid, no hay id numerico
+    expuesto en el listado.
+    """
+    items, vistos = [], set()
+    for m in SUPERSTAR_ROW_RE.finditer(markup):
+        slug = m.group(1).rsplit("/", 1)[-1]
+        if slug in vistos:
+            continue
+        vistos.add(slug)
+
+        nombre = html.unescape(re.sub(r"<[^>]+>", " ", m.group(2))).strip()
+        bloque = m.group(0)
+        img = re.search(r'<source srcset="([^"\s]+)', bloque)
+        if not img:
+            continue
+        preset = re.sub(r"/f/styles/[a-z0-9_]+(?:__composite)?/public/",
+                        "/f/styles/%s/public/" % SUPERSTAR_IMAGE_STYLE,
+                        html.unescape(img.group(1)))
+        original = re.sub(r"/f/styles/[a-z0-9_]+(?:__composite)?/public/",
+                          "/f/", html.unescape(img.group(1)))
+
+        it = {
+            "cid": "superstar:" + slug,
+            "title": nombre or slug.replace("-", " ").title(),
+            "url": urljoin(BASE_URL, "/superstars/" + slug),
+            "image": urljoin(BASE_URL, original),
+            "image_fallback": urljoin(BASE_URL, preset),
+            "content_type": "superstar", "show": "",
+            "topic": TOPIC_SUPERSTARS,
+        }
+        items.append(it)
+    return items
+
+
+SHOW_ITEM_RE = re.compile(
+    r'<a href="https://www\.wwe\.com(/shows/[a-z0-9-]+)" class="b-link">'
+    r'(.*?)</picture>', re.S)
+
+
+def parse_shows_page(markup):
+    """
+    Shows fijos del hub /shows: pagina estatica, sin scroll infinito.
+
+    Cada show aparece dos veces (hero + logo, ambos con el mismo enlace):
+    se queda con la primera imagen encontrada (el hero, mas grande) por slug.
+    """
+    items, vistos = [], set()
+    for m in SHOW_ITEM_RE.finditer(markup):
+        slug = m.group(1).rsplit("/", 1)[-1]
+        if slug in vistos:
+            continue
+        vistos.add(slug)
+
+        bloque = m.group(0)
+        img = re.search(r'data-src="([^"]+)"', bloque) or re.search(r'src="([^"]+)"', bloque)
+        if not img:
+            continue
+        original, preset = image_urls(img.group(1))
+
+        it = {
+            "cid": "show:" + slug,
+            "title": SHOW_LABEL.get(slug, slug.replace("-", " ").title()),
+            "url": urljoin(BASE_URL, "/shows/" + slug),
+            "image": original, "image_fallback": preset,
+            "content_type": "show", "show": slug,
+            "topic": TOPIC_SHOWS,
+        }
+        items.append(it)
+    return items
+
+
+EVENT_CARD_RE = re.compile(
+    r'<div class="events-upcoming-card\b.*?</div>\s*</div>\s*</div>\s*</div>',
+    re.S)
+
+
+def parse_events_page(markup):
+    """
+    Proximos eventos de /events/results/... (landing geolocalizada).
+
+    No hay archivo historico paginable como en /photos: esta landing solo
+    muestra los eventos proximos en la zona resuelta por IP. El cid se arma
+    con el slug de /event/<slug> (estable, sin id numerico en el listado).
+    """
+    items, vistos = [], set()
+    for bloque in EVENT_CARD_RE.findall(markup):
+        href = re.search(r'href="(/event/[^"?]+)"', bloque)
+        if not href:
+            continue
+        slug = href.group(1).rsplit("/", 1)[-1]
+        if slug in vistos:
+            continue
+        vistos.add(slug)
+
+        t = re.search(r'datetime="[^"]*"[^>]*>([^<]+)</time>', bloque)
+        fecha = html.unescape(t.group(1)).strip() if t else ""
+        loc = re.search(r'event-breaker--meta-location">([^<]+)<', bloque)
+        lugar = html.unescape(loc.group(1)).strip() if loc else ""
+        titulo = " — ".join(p for p in (fecha, lugar) if p) or slug
+
+        img = re.search(r'data-src="([^"]+\.(?:jpe?g|png))"', bloque, re.I)
+        if not img:
+            continue
+        original, preset = image_urls(img.group(1))
+
+        it = {
+            "cid": "event:" + slug,
+            "title": titulo,
+            "url": urljoin(BASE_URL, "/event/" + slug),
+            "image": original, "image_fallback": preset,
+            "content_type": "event", "show": "",
+            "topic": TOPIC_EVENTS,
+        }
         items.append(it)
     return items
 
@@ -921,6 +1173,12 @@ def build_caption(item):
         tags.append("#Video")
     elif item["content_type"] == "icon":
         tags.append("#Icono")
+    elif item["content_type"] == "superstar":
+        tags.append("#Superstar")
+    elif item["content_type"] == "show":
+        tags.append("#Show")
+    elif item["content_type"] == "event":
+        tags.append("#Evento")
     if tags:
         cap += "\n" + " ".join(tags)
     if item["url"]:
@@ -959,6 +1217,9 @@ async def send_media(client, group, topic_id, paths, caption,
     Telethon agrupa automaticamente cuando se le pasa una lista (maximo 10,
     limite de Telegram para un media group). El pie va en el primer elemento,
     que es el que se ve en el listado del tema.
+
+    Devuelve el mensaje enviado (o el primero, si Telegram devuelve varios
+    para un album) para poder enlazarlo despues, o False si fallo.
     """
     paths = [p for p in paths if p and p.exists()]
     if not paths:
@@ -991,13 +1252,12 @@ async def send_media(client, group, topic_id, paths, caption,
             try:
                 handle = await upload_file_parallel(client, paths[0],
                                                     progress_callback=_cb)
-                await client.send_file(
+                return await client.send_file(
                     group, handle, caption=caption,
                     parse_mode="html", reply_to=topic_id,
                     force_document=True,
                     file_size=paths[0].stat().st_size,
                     attributes=[tltypes.DocumentAttributeFilename(paths[0].name)])
-                return True
             except FloodWaitError as e:
                 log.warning("FloodWait al publicar: %ds", e.seconds)
                 await asyncio.sleep(e.seconds + 5)
@@ -1023,12 +1283,14 @@ async def send_media(client, group, topic_id, paths, caption,
 
     for _ in range(MAX_RETRIES):
         try:
-            await client.send_file(
+            sent = await client.send_file(
                 group, [str(p) for p in paths], caption=caption,
                 parse_mode="html", reply_to=topic_id,
                 force_document=as_document,
                 progress_callback=_cb if len(paths) > 1 else None)
-            return True
+            # Un album devuelve una lista de mensajes; el primero es el que
+            # lleva el pie y al que interesa enlazar.
+            return sent[0] if isinstance(sent, list) else sent
         except FloodWaitError as e:
             log.warning("FloodWait al publicar: %ds", e.seconds)
             await asyncio.sleep(e.seconds + 5)
@@ -1039,18 +1301,29 @@ async def send_media(client, group, topic_id, paths, caption,
     return False
 
 
+def _chunks(seq, n):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
 async def publish_gallery(client, group, topics, session, conn, item,
                           dry_run=False):
     """
-    Publica una galeria como UN solo post en el tema de su show:
+    Publica una galeria como un post en el tema de su show:
 
-      1. un album con las primeras ALBUM_MAX fotos (el maximo que Telegram
-         agrupa en un mismo mensaje), y
-      2. el ZIP con TODAS las fotos en calidad original.
+      1. el ZIP con TODAS las fotos en calidad original, primero, y
+      2. TODAS las fotos, repartidas en albumes de ALBUM_MAX (el maximo que
+         Telegram agrupa en un mismo mensaje), cada uno con un enlace de
+         vuelta al mensaje del ZIP.
+
+    Antes solo se subia un album de muestra de ALBUM_MAX fotos; ahora se
+    suben todas, sin perder la referencia al ZIP: en vez del pie unico de
+    antes, cada album enlaza al mensaje del ZIP (que va primero, para que
+    el enlace ya exista cuando se arman los pies de los albumes).
 
     No se abre un tema por galeria: hay ~1.600 en el archivo historico y esa
     lista de temas dejaria el supergrupo inservible. Asi cada galeria ocupa
-    una sola posicion, en su lugar cronologico del feed.
+    varias posiciones seguidas, en su lugar cronologico del feed.
 
     Devuelve 1 si se publico, 0 si no.
     """
@@ -1062,8 +1335,9 @@ async def publish_gallery(client, group, topics, session, conn, item,
 
     titulo = titulo or item["title"]
     if dry_run:
-        log.info("[DRY-RUN] galeria '%s': album de %d + ZIP de %d fotos",
-                 titulo[:50], min(ALBUM_MAX, len(fotos)), len(fotos))
+        albumes = -(-len(fotos) // ALBUM_MAX)  # ceil
+        log.info("[DRY-RUN] galeria '%s': %d fotos en %d album(es) + ZIP",
+                 titulo[:50], len(fotos), albumes)
         return 1
 
     tid = topics[item["topic"]]
@@ -1098,33 +1372,52 @@ async def publish_gallery(client, group, topics, session, conn, item,
                 z.write(f, f.name)
         tam = zip_path.stat().st_size
 
-        pie = ("<b>%s</b>\n\U0001F4F8 %d fotos \u2014 %s"
-               % (html.escape(titulo), len(descargadas), human(tam)))
-        if item.get("show"):
-            pie += "\n#" + SHOW_LABEL.get(item["show"], item["show"])
-        if item.get("url"):
-            pie += ('\n\n<a href="%s">Ver galeria en WWE.com</a>'
-                    % html.escape(item["url"]))
-        pie = pie[:CAPTION_MAX]
+        etiqueta_show = ("\n#" + SHOW_LABEL.get(item["show"], item["show"])
+                         if item.get("show") else "")
+        enlace_wwe = ('\n\n<a href="%s">Ver galeria en WWE.com</a>'
+                     % html.escape(item["url"])) if item.get("url") else ""
 
-        # 3) Album de portada: el pie va en el album, que es lo que se ve
-        #    en el feed del tema; el ZIP queda justo debajo.
-        muestra = descargadas[:ALBUM_MAX]
-        log.info("Galeria '%s': subiendo album de %d fotos...", titulo[:45], len(muestra))
-        ok = await send_media(client, group, tid, muestra, pie)
-        if not ok:
-            return 0
-
-        await asyncio.sleep(SEND_DELAY)
+        # 3) ZIP primero: asi ya existe su mensaje (y el enlace a el) cuando
+        #    se arman los pies de los albumes de fotos, que lo referencian.
         log.info("Galeria '%s': subiendo ZIP de %d fotos (%s)...",
                  titulo[:45], len(descargadas), human(tam))
-        await send_media(client, group, tid, [zip_path],
-                         "📦 %s — %d fotos en calidad original"
-                         % (html.escape(titulo)[:200], len(descargadas)),
-                         as_document=True)
+        zip_pie = ("📦 <b>%s</b> — %d fotos en calidad original%s"
+                   % (html.escape(titulo)[:200], len(descargadas), etiqueta_show))
+        zip_msg = await send_media(client, group, tid, [zip_path],
+                                   zip_pie[:CAPTION_MAX], as_document=True)
+        if not zip_msg:
+            return 0
+        zip_link = "https://t.me/c/%d/%d" % (group.id, zip_msg.id)
 
-        log.info("Galeria '%s': album de %d + ZIP de %d fotos (%s)",
-                 titulo[:45], len(muestra), len(descargadas), human(tam))
+        # 4) Todas las fotos, en albumes de ALBUM_MAX. Cada uno enlaza al
+        #    ZIP, asi cualquiera de ellos (no solo el primero) permite
+        #    llegar a la galeria completa en calidad original.
+        grupos = list(_chunks(descargadas, ALBUM_MAX))
+        await asyncio.sleep(SEND_DELAY)
+        enviadas = 0
+        for idx, grupo in enumerate(grupos, 1):
+            pie = "<b>%s</b>" % html.escape(titulo)
+            if len(grupos) > 1:
+                pie += ("\n📸 Parte %d/%d (%d fotos)"
+                       % (idx, len(grupos), len(descargadas)))
+            else:
+                pie += "\n📸 %d fotos" % len(descargadas)
+            pie += etiqueta_show
+            pie += ('\n\n<a href="%s">📦 ZIP con todas en calidad original</a>'
+                   % zip_link)
+            pie += enlace_wwe
+            pie = pie[:CAPTION_MAX]
+
+            log.info("Galeria '%s': subiendo album %d/%d (%d fotos)...",
+                     titulo[:45], idx, len(grupos), len(grupo))
+            ok = await send_media(client, group, tid, grupo, pie)
+            if ok:
+                enviadas += len(grupo)
+            if idx < len(grupos):
+                await asyncio.sleep(SEND_DELAY)
+
+        log.info("Galeria '%s': %d/%d fotos publicadas en %d album(es) + ZIP (%s)",
+                 titulo[:45], enviadas, len(descargadas), len(grupos), human(tam))
         return 1
     finally:
         # El disco no se queda con la galeria descargada.
@@ -1372,6 +1665,241 @@ async def run_photos(limit=0, start_page=None, dry_run=False, client=None):
             await client.disconnect()
 
 
+async def run_superstars(limit=0, start_page=None, dry_run=False, client=None):
+    """
+    Modo SUPERSTARS: recorre /superstars, el listado de luchadores.
+
+    Misma vista Drupal que la portada (views_infinite_scroll), asi que
+    pagina igual via /views/ajax; verificado 0% de solapamiento entre
+    paginas. Independiente de los otros modos: tiene su propio progreso
+    ('superstars_page') y su propio lock, y comparte el indice 'seen'.
+
+    Cada luchador se publica como una sola foto de perfil en el tema
+    Superstars.
+
+    `client`: si se pasa un TelegramClient ya conectado (--backfill-all lo
+    comparte con los demas modos para no abrir dos conexiones a la vez sobre
+    el mismo archivo de sesion), se reusa y NO se desconecta al salir; si
+    no, esta funcion crea y cierra el suyo, como antes.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        page = (int(bf_get(conn, "superstars_page", "0"))
+                if start_page is None else start_page)
+        hechos = int(bf_get(conn, "superstars_total", "0"))
+        log.info("Superstars desde la pagina %d (llevaba %d).", page, hechos)
+
+        try:
+            r = session.get(BASE_URL + SUPERSTARS_PATH, timeout=30)
+            r.raise_for_status()
+            m = re.search(r"js-view-dom-id-([0-9a-f]{16,})", r.text)
+            dom_id = m.group(1) if m else ""
+        except requests.RequestException as e:
+            log.error("No se pudo abrir %s: %s", SUPERSTARS_PATH, e)
+            return 0
+
+        topics = None
+        if not dry_run:
+            if client is None:
+                client = await get_client()
+            group = await ensure_group(client)
+            topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        procesadas, vacias = 0, 0
+        while limit == 0 or procesadas < limit:
+            try:
+                markup = fetch_page(session, dom_id, page,
+                                    view=SUPERSTARS_VIEW,
+                                    display=SUPERSTARS_DISPLAY,
+                                    path=SUPERSTARS_PATH)
+            except RuntimeError as e:
+                log.error("%s. Me detengo; al relanzar sigo aqui.", e)
+                break
+
+            luchadores = parse_superstars_page(markup)
+            if not luchadores:
+                vacias += 1
+                if vacias >= 2:
+                    log.info("Pagina %d vacia dos veces: fin de %s.",
+                             page, SUPERSTARS_PATH)
+                    bf_set(conn, "superstars_done", "1")
+                    break
+                page += 1
+                continue
+            vacias = 0
+
+            nuevos = [it for it in luchadores if not already_seen(conn, it["cid"])]
+            log.info("Pagina %d: %d luchadores, %d nuevos (total: %d)",
+                     page, len(luchadores), len(nuevos), hechos)
+
+            for it in nuevos:
+                if dry_run:
+                    log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
+                    continue
+
+                path = download_image(session, it)
+                if not path:
+                    log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                    record(conn, it, False)
+                    continue
+                try:
+                    ok = await publish(client, group, topics[it["topic"]], path, it)
+                finally:
+                    path.unlink(missing_ok=True)
+                record(conn, it, ok)
+                if ok:
+                    hechos += 1
+                    bf_set(conn, "superstars_total", hechos)
+                await asyncio.sleep(SEND_DELAY)
+
+            page += 1
+            procesadas += 1
+            if not dry_run:
+                if page > int(bf_get(conn, "superstars_page", "0")):
+                    bf_set(conn, "superstars_page", page)
+            time.sleep(1.0)  # cortesia con el servidor
+
+        log.info("Tanda terminada: %d paginas, %d superstars en total. "
+                 "Proxima pagina: %d", procesadas, hechos, page)
+        return hechos
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
+async def run_shows(dry_run=False, client=None):
+    """
+    Modo SHOWS: /shows es un hub estatico y pequeno (9 shows fijos: Raw,
+    SmackDown, NXT, SNME, Money in the Bank, Survivor Series WarGames, AAA,
+    WWE Evolve, NXT PLE), sin scroll infinito ni archivo historico: no hace
+    falta paginar ni progreso por pagina, basta con revisarlo entero cada
+    vez (el dedupe por cid evita republicar los mismos 9).
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        try:
+            r = session.get(SHOWS_URL, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.error("No se pudo abrir /shows: %s", e)
+            return 0
+
+        shows = parse_shows_page(r.text)
+        nuevos = [it for it in shows if not already_seen(conn, it["cid"])]
+        log.info("Shows: %d en el hub, %d nuevos.", len(shows), len(nuevos))
+        if not nuevos:
+            return 0
+
+        if dry_run:
+            for it in nuevos:
+                log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
+            return 0
+
+        if client is None:
+            client = await get_client()
+        group = await ensure_group(client)
+        topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        enviados = 0
+        for it in nuevos:
+            path = download_image(session, it)
+            if not path:
+                log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                record(conn, it, False)
+                continue
+            try:
+                ok = await publish(client, group, topics[it["topic"]], path, it)
+            finally:
+                path.unlink(missing_ok=True)
+            record(conn, it, ok)
+            if ok:
+                enviados += 1
+                log.info("Publicado [%s] %s", it["topic"], it["title"][:60])
+            await asyncio.sleep(SEND_DELAY)
+
+        log.info("Shows: %d publicados de %d nuevos.", enviados, len(nuevos))
+        return enviados
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
+async def run_events(dry_run=False, client=None):
+    """
+    Modo EVENTS: /events/ redirige (302, geolocalizado por IP) a
+    /events/results/all-events/all-dates/<lat>/<lng>/<ciudad>/<pais>, una
+    landing de "proximos eventos" sin scroll infinito ni pager: no es un
+    archivo historico como /photos, solo vigilancia de novedades. El cid
+    se arma con el slug de /event/<slug>, asi que un evento que deja de
+    aparecer (porque ya paso) no se vuelve a tocar ni se pierde: queda
+    marcado en 'seen' desde la primera vez que se vio.
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        try:
+            # requests sigue el 302 solo; la URL final ya trae la geo
+            # resuelta por Fastly a partir de la IP de salida.
+            r = session.get(EVENTS_URL, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            log.error("No se pudo abrir /events/: %s", e)
+            return 0
+
+        eventos = parse_events_page(r.text)
+        nuevos = [it for it in eventos if not already_seen(conn, it["cid"])]
+        log.info("Events: %d proximos, %d nuevos.", len(eventos), len(nuevos))
+        if not nuevos:
+            return 0
+
+        if dry_run:
+            for it in nuevos:
+                log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
+            return 0
+
+        if client is None:
+            client = await get_client()
+        group = await ensure_group(client)
+        topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        enviados = 0
+        for it in nuevos:
+            path = download_image(session, it)
+            if not path:
+                log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                record(conn, it, False)
+                continue
+            try:
+                ok = await publish(client, group, topics[it["topic"]], path, it)
+            finally:
+                path.unlink(missing_ok=True)
+            record(conn, it, ok)
+            if ok:
+                enviados += 1
+                log.info("Publicado [%s] %s", it["topic"], it["title"][:60])
+            await asyncio.sleep(SEND_DELAY)
+
+        log.info("Events: %d publicados de %d nuevos.", enviados, len(nuevos))
+        return enviados
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
 async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
     """
     Volcado del archivo historico, pagina a pagina y REANUDABLE.
@@ -1477,25 +2005,34 @@ async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
 
 
 # Cada cuantas tandas de backfill se intercala una pasada de run_once
-# (novedades del dia a dia, ver run_backfill_all). run_backfill/run_photos
-# solo avanzan hacia paginas mas altas y nunca vuelven a la 0: sin esto, lo
-# que WWE.com publique mientras el backfill esta en curso no se capturaria
-# nunca, porque el backfill ya la paso de largo para cuando llega.
+# (novedades del dia a dia, ver run_backfill_all). run_backfill/run_photos/
+# run_superstars solo avanzan hacia paginas mas altas y nunca vuelven a la 0:
+# sin esto, lo que WWE.com publique mientras el backfill esta en curso no se
+# capturaria nunca, porque el backfill ya la paso de largo para cuando llega.
 NOVEDADES_CADA_TANDAS = 20
+
+# /shows y /events no son archivo historico paginable (ver run_shows/
+# run_events): son un puñado de items estaticos o de vigilancia geolocalizada
+# que se revisan enteros cada vez. No hace falta mirarlos en cada tanda como
+# el resto -- alcanza con cada N tandas, igual que las novedades de portada.
+SHOWS_EVENTS_CADA_TANDAS = 20
 
 
 async def run_backfill_all(dry_run=False):
     """
-    Corre portada y galerias historicas HASTA EL FINAL de ambas, alternando
-    tandas en el mismo proceso con un solo TelegramClient compartido, e
-    intercala cada NOVEDADES_CADA_TANDAS vueltas una pasada de run_once para
-    cubrir tambien lo que WWE.com publica mientras tanto.
+    Corre portada, galerias y superstars historicos HASTA EL FINAL de los
+    tres, alternando tandas en el mismo proceso con un solo TelegramClient
+    compartido, e intercala cada NOVEDADES_CADA_TANDAS vueltas una pasada de
+    run_once (novedades de portada) y cada SHOWS_EVENTS_CADA_TANDAS una de
+    run_shows + run_events (contenido estatico/geolocalizado, sin archivo
+    historico que agotar) para cubrir tambien lo que WWE.com publica ahi
+    mientras tanto.
 
     Pensado para el unico always-on task disponible en PythonAnywhere
     Developer: un solo comando que deja corriendo el volcado completo de
-    /homepage (--backfill) y /photos (--photos) sin intervencion, en vez de
-    necesitar tareas separadas que el plan no tiene espacio para correr a
-    la vez.
+    /homepage (--backfill), /photos (--photos) y /superstars
+    (--superstars) sin intervencion, en vez de necesitar tareas separadas
+    que el plan no tiene espacio para correr a la vez.
 
     Por que hace falta intercalar run_once: run_backfill avanza de pagina 0
     hacia arriba y NUNCA vuelve a revisar paginas ya pasadas. Como la pagina
@@ -1506,7 +2043,9 @@ async def run_backfill_all(dry_run=False):
     algo COMPLETAMENTE nuevo que aparece en la pagina 0 mientras el backfill
     esta en la pagina 872, por ejemplo, nunca se veria si nada vuelve a
     mirar la pagina 0. run_once si la mira (recorre MAX_PAGES paginas desde
-    la 0 en cada pasada), por eso se intercala.
+    la 0 en cada pasada), por eso se intercala. /superstars no tiene ese
+    problema (el listado entero se revisa por pagina y el orden no importa
+    tanto), pero comparte el mismo patron de avance de solo ida.
 
     No se usa asyncio.gather para correr los modos en paralelo real porque
     cada uno abre su propio TelegramClient, y dos clientes escribiendo a la
@@ -1518,11 +2057,12 @@ async def run_backfill_all(dry_run=False):
     total apreciable.
 
     Reanudable como los modos sueltos: el progreso de cada uno vive en sus
-    propias claves de la tabla 'backfill' ('page'/'done' y
-    'photos_page'/'photos_done'), asi que cortar esto con Ctrl+C o que se
-    caiga el always-on task no pierde avance. run_once no tiene una nocion
-    de "terminado" (siempre hay novedades por revisar), asi que se sigue
-    intercalando incluso despues de que portada y galerias historicas ya
+    propias claves de la tabla 'backfill' ('page'/'done',
+    'photos_page'/'photos_done' y 'superstars_page'/'superstars_done'), asi
+    que cortar esto con Ctrl+C o que se caiga el always-on task no pierde
+    avance. run_once/run_shows/run_events no tienen una nocion de
+    "terminado" (siempre hay novedades por revisar), asi que se siguen
+    intercalando incluso despues de que portada, galerias y superstars ya
     llegaron al final de su archivo.
     """
     client = None
@@ -1536,6 +2076,7 @@ async def run_backfill_all(dry_run=False):
             c = db_connect()
             feed_done = bf_get(c, "done") == "1"
             photos_done = bf_get(c, "photos_done") == "1"
+            superstars_done = bf_get(c, "superstars_done") == "1"
             c.close()
 
             if tanda % NOVEDADES_CADA_TANDAS == 0:
@@ -1545,7 +2086,15 @@ async def run_backfill_all(dry_run=False):
                 except Exception:
                     log.exception("Error revisando novedades (#%d); sigo.", tanda)
 
-            if feed_done and photos_done:
+            if tanda % SHOWS_EVENTS_CADA_TANDAS == 0:
+                try:
+                    log.info("Revisando shows y eventos (tanda #%d)...", tanda)
+                    await run_shows(dry_run=dry_run, client=client)
+                    await run_events(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error revisando shows/eventos (#%d); sigo.", tanda)
+
+            if feed_done and photos_done and superstars_done:
                 # El historico ya termino, pero las novedades siguen
                 # llegando: no se corta, solo se espacian mas las vueltas
                 # para no golpear el sitio sin necesidad.
@@ -1560,7 +2109,7 @@ async def run_backfill_all(dry_run=False):
                 except Exception:
                     log.exception("Error en tanda de portada (#%d); sigo.", tanda)
             else:
-                log.info("Portada ya completa; solo faltan galerias.")
+                log.info("Portada ya completa.")
 
             if not photos_done:
                 try:
@@ -1568,7 +2117,15 @@ async def run_backfill_all(dry_run=False):
                 except Exception:
                     log.exception("Error en tanda de galerias (#%d); sigo.", tanda)
             else:
-                log.info("Galerias ya completas; solo falta portada.")
+                log.info("Galerias ya completas.")
+
+            if not superstars_done:
+                try:
+                    await run_superstars(limit=1, dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error en tanda de superstars (#%d); sigo.", tanda)
+            else:
+                log.info("Superstars ya completos.")
 
             await asyncio.sleep(2.0)  # cortesia extra entre tandas alternadas
     finally:
@@ -1607,6 +2164,10 @@ def show_status():
         ph_total = int(bf_get(conn, "photos_total", "0"))
         ph_done = bf_get(conn, "photos_done") == "1"
 
+        ss_page = int(bf_get(conn, "superstars_page", "0"))
+        ss_total = int(bf_get(conn, "superstars_total", "0"))
+        ss_done = bf_get(conn, "superstars_done") == "1"
+
         print("Publicados     : %d" % enviados)
         print("Vistos (indice): %d" % vistos)
         print()
@@ -1621,6 +2182,8 @@ def show_status():
                   % (faltan, horas, SEND_DELAY, faltan * 1.7 / 1024))
         print("GALERIAS pagina %d, %d galerias publicadas%s"
               % (ph_page, ph_total, "  [COMPLETO]" if ph_done else ""))
+        print("SUPERSTARS pagina %d, %d luchadores publicados%s"
+              % (ss_page, ss_total, "  [COMPLETO]" if ss_done else ""))
         por_tema = conn.execute(
             "SELECT topic, COUNT(*) FROM seen WHERE sent=1 "
             "GROUP BY topic ORDER BY 2 DESC").fetchall()
@@ -1638,12 +2201,19 @@ async def amain(args):
     if args.login:
         return await do_login()
 
-    # Un lock por modo: portada y galerias son independientes y pueden
-    # correr a la vez sin pisarse. --backfill-all toma los dos, porque
-    # alterna entre ambos y no deberia convivir con --backfill/--photos
-    # sueltos pisando el mismo progreso a la vez.
+    # Un lock por modo: cada uno es independiente y pueden correr a la vez
+    # sin pisarse. --backfill-all toma los tres que tienen archivo historico
+    # paginable (feed/photos/superstars), porque alterna entre ellos y no
+    # deberia convivir con --backfill/--photos/--superstars sueltos pisando
+    # el mismo progreso a la vez.
     if args.backfill_all:
-        modos = ["feed", "photos"]
+        modos = ["feed", "photos", "superstars"]
+    elif args.superstars:
+        modos = ["superstars"]
+    elif args.shows:
+        modos = ["shows"]
+    elif args.events:
+        modos = ["events"]
     else:
         modos = ["photos" if args.photos else "feed"]
     try:
@@ -1656,8 +2226,15 @@ async def amain(args):
         return 0
     try:
         if args.backfill_all:
-            log.info("Modo backfill-all: portada + galerias hasta el final de ambas.")
+            log.info("Modo backfill-all: portada + galerias + superstars "
+                     "hasta el final de las tres.")
             await run_backfill_all(args.dry_run)
+        elif args.superstars:
+            await run_superstars(args.limit, args.from_page, args.dry_run)
+        elif args.shows:
+            await run_shows(args.dry_run)
+        elif args.events:
+            await run_events(args.dry_run)
         elif args.photos:
             await run_photos(args.limit, args.from_page, args.dry_run)
         elif args.backfill:
@@ -1690,20 +2267,32 @@ def main():
     ap.add_argument("--photos", action="store_true",
                     help="MODO GALERIAS: recorre /photos y publica cada "
                          "galeria como album + ZIP. Reanudable.")
+    ap.add_argument("--superstars", action="store_true",
+                    help="MODO SUPERSTARS: recorre /superstars y publica "
+                         "la foto de perfil de cada luchador. Reanudable.")
+    ap.add_argument("--shows", action="store_true",
+                    help="MODO SHOWS: revisa el hub estatico /shows (9 shows "
+                         "fijos) y publica los que falten. Sin paginacion.")
+    ap.add_argument("--events", action="store_true",
+                    help="MODO EVENTS: revisa /events/ (proximos eventos, "
+                         "geolocalizado) y publica los que falten. Sin "
+                         "archivo historico, solo vigilancia de novedades.")
     ap.add_argument("--backfill", action="store_true",
                     help="volcado del archivo historico (~22.200 items), "
                          "reanudable: al relanzar sigue donde iba")
     ap.add_argument("--backfill-all", action="store_true",
-                    help="portada (--backfill) + galerias (--photos) juntos, "
-                         "alternando tandas hasta el final de ambas. Pensado "
-                         "para dejarlo como unico always-on task, corriendo "
-                         "indefinidamente (nunca corta por un error puntual)")
+                    help="portada (--backfill) + galerias (--photos) + "
+                         "superstars (--superstars) juntos, alternando "
+                         "tandas hasta el final de las tres (e intercalando "
+                         "shows/events). Pensado para dejarlo como unico "
+                         "always-on task, corriendo indefinidamente (nunca "
+                         "corta por un error puntual)")
     ap.add_argument("--limit", type=int, default=0, metavar="N",
-                    help="con --backfill/--photos: paginas por tanda "
-                         "(0 = sin limite)")
+                    help="con --backfill/--photos/--superstars: paginas por "
+                         "tanda (0 = sin limite)")
     ap.add_argument("--from-page", type=int, default=None, metavar="N",
-                    help="con --backfill/--photos: reanuda desde esta pagina, "
-                         "ignorando el progreso guardado")
+                    help="con --backfill/--photos/--superstars: reanuda "
+                         "desde esta pagina, ignorando el progreso guardado")
     ap.add_argument("--status", action="store_true",
                     help="muestra el progreso y sale")
     ap.add_argument("-v", "--verbose", action="store_true")
