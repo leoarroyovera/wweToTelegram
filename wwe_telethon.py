@@ -130,6 +130,13 @@ LOOSE_IMAGES = os.environ.get("WWE_LOOSE_IMAGES", "1") == "1"
 # Telegram agrupa como maximo 10 medios en un mismo mensaje.
 ALBUM_MAX = min(int(os.environ.get("WWE_ALBUM_MAX", "10")), 10)
 
+# Limites de Telegram para aceptar un archivo como "foto" (no documento):
+# relacion de aspecto maxima 20:1 y ancho+alto <= 10000px. Si se excede,
+# UploadMediaRequest devuelve "PHOTO_INVALID_DIMENSIONS" y tira TODO el
+# album junto, no solo la imagen ofensora.
+PHOTO_MAX_ASPECT = 20
+PHOTO_MAX_SIDE_SUM = 10000
+
 # ==========================================================================
 # Constantes del sitio (verificadas contra wwe.com)
 # ==========================================================================
@@ -1209,6 +1216,27 @@ async def publish(client, group, topic_id, path, item):
     return False
 
 
+def _photo_dims_invalid(path):
+    """
+    True si Telegram va a rechazar path como foto por PHOTO_INVALID_DIMENSIONS
+    (aspecto extremo o demasiado grande). Si no se puede leer con Pillow,
+    se asume invalida: mejor mandarla como documento que tirar el album.
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            w, h = img.size
+    except Exception:
+        return True
+    if w <= 0 or h <= 0:
+        return True
+    if (w + h) > PHOTO_MAX_SIDE_SUM:
+        return True
+    if max(w, h) / min(w, h) > PHOTO_MAX_ASPECT:
+        return True
+    return False
+
+
 async def send_media(client, group, topic_id, paths, caption,
                      as_document=False):
     """
@@ -1266,6 +1294,23 @@ async def send_media(client, group, topic_id, paths, caption,
                 await asyncio.sleep(5)
         log.error("No se pudieron enviar %d archivo(s).", len(paths))
         return False
+
+    # Una sola foto con dimensiones invalidas (aspecto extremo, corrupta)
+    # tira TODO el album junto (PHOTO_INVALID_DIMENSIONS). Se filtran antes
+    # de intentar, para no perder las demas fotos del grupo por esta.
+    if not as_document:
+        invalidas = [p for p in paths if _photo_dims_invalid(p)]
+        if invalidas:
+            log.warning("%d foto(s) con dimensiones invalidas, van como "
+                       "documento: %s", len(invalidas),
+                       ", ".join(p.name for p in invalidas))
+            paths = [p for p in paths if p not in invalidas]
+            for p in invalidas:
+                await send_media(client, group, topic_id, [p], caption,
+                                 as_document=True)
+                await asyncio.sleep(SEND_DELAY)
+        if not paths:
+            return False
 
     # Un album no toma la ruta rapida de fast_upload (esa es solo para un
     # documento suelto): Telethon lo sube secuencial, con recompresion de
@@ -1472,8 +1517,8 @@ async def run_once(dry_run=False, client=None):
             try:
                 markup = fetch_page(session, dom_id, page)
             except RuntimeError as e:
-                log.error("%s", e)
-                break
+                log.warning("%s; salto a la siguiente pagina.", e)
+                continue
             cards = parse_cards(markup)
             if not cards:
                 log.info("Pagina %d vacia; fin del scroll.", page)
@@ -1604,8 +1649,9 @@ async def run_photos(limit=0, start_page=None, dry_run=False, client=None):
                 markup = fetch_page(session, dom_id, page, view=PHOTOS_VIEW,
                                     display=PHOTOS_DISPLAY, path=PHOTOS_PATH)
             except RuntimeError as e:
-                log.error("%s. Me detengo; al relanzar sigo aqui.", e)
-                break
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                continue
 
             galerias = parse_photos_page(markup)
             if not galerias:
@@ -1715,8 +1761,9 @@ async def run_superstars(limit=0, start_page=None, dry_run=False, client=None):
                                     display=SUPERSTARS_DISPLAY,
                                     path=SUPERSTARS_PATH)
             except RuntimeError as e:
-                log.error("%s. Me detengo; al relanzar sigo aqui.", e)
-                break
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                continue
 
             luchadores = parse_superstars_page(markup)
             if not luchadores:
@@ -1943,8 +1990,10 @@ async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
             try:
                 cards = parse_cards(fetch_page(session, dom_id, page))
             except RuntimeError as e:
-                log.error("%s. Me detengo; al relanzar sigo en esta pagina.", e)
-                break
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                save_progress(conn, page)
+                continue
 
             if not cards:
                 # Dos vacias seguidas = fin real del feed, no un hueco.
