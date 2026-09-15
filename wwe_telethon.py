@@ -162,6 +162,16 @@ SUPERSTARS_PATH = "/superstars"
 SHOWS_URL = BASE_URL + "/shows"
 EVENTS_URL = BASE_URL + "/events/"
 
+# Landing de "proximos eventos" con coordenadas fijas (Buin, RM, Chile), en
+# vez de depender de la geolocalizacion por IP de EVENTS_URL. Misma vista
+# Drupal via AJAX que la home (views/ajax), otro nombre: wwe_ticktes/block_1.
+# Sin pager real: siempre trae de una sola vez todos los eventos "cercanos"
+# a esas coordenadas (probado con --page 0/1/2, misma respuesta).
+EVENTS_LOCAL_PATH = "/events/results/all-events/all-dates/-33.730/-70.720/buin, RM, CHL/CL"
+EVENTS_LOCAL_URL = BASE_URL + EVENTS_LOCAL_PATH
+EVENTS_LOCAL_VIEW = "wwe_ticktes"
+EVENTS_LOCAL_DISPLAY = "block_1"
+
 # Preset de respaldo si el original no sirve: 1920x1080, ~380 KB.
 IMAGE_STYLE = "wwe_16_9_xl_r"
 # Idem para la foto de perfil de un luchador (cuadrada): el original da 503
@@ -752,6 +762,49 @@ def parse_events_page(markup):
             "topic": TOPIC_EVENTS,
         }
         items.append(it)
+    return items
+
+
+EVENTS_LOCAL_ROW_RE = re.compile(
+    r'<h2 class="events-upcoming-header"><a href="([^"]+)"[^>]*>([^<]*)</a></h2>'
+    r'\s*<div class="events-upcoming-logo">.*?<img[^>]+src="([^"]+\.png)"',
+    re.S)
+
+
+def parse_events_local_page(markup):
+    """
+    Logos PNG de la landing de "proximos eventos" con coordenadas fijas
+    (EVENTS_LOCAL_URL): una fila por evento, cada una con el logo del show
+    (RAW/SmackDown/NXT Live...) en preset 'thumbnail'.
+
+    A diferencia de parse_events_page(), aqui el interes no es el evento en
+    si sino el PNG del logo: van todos al tema Iconos, sea cual sea el show.
+    Varios eventos comparten el mismo logo (p.ej. 8 fechas de "NXT Live"),
+    asi que el cid se arma con la ruta de la imagen -- igual que hace
+    scrape_loose_images() con los iconos de la home -- para subir cada logo
+    una sola vez sin importar cuantos eventos lo usen, en vez de un cid por
+    evento que repetiria el mismo PNG una y otra vez.
+    """
+    items, vistos = [], set()
+    for m in EVENTS_LOCAL_ROW_RE.finditer(markup):
+        href, titulo_crudo, img_src = m.groups()
+        original, preset = image_urls(img_src)
+        if original in vistos:
+            continue
+        vistos.add(original)
+
+        ruta = original.split(BASE_URL, 1)[-1].lstrip("/")
+        nombre = os.path.basename(ruta.split("?")[0])
+        titulo = html.unescape(titulo_crudo).strip() or nombre
+
+        items.append({
+            "cid": "img:" + ruta,
+            "title": titulo,
+            "url": urljoin(BASE_URL, href),
+            "image": original, "image_fallback": preset,
+            "content_type": "icon", "show": "",
+            "topic": TOPIC_ICONS,
+        })
     return items
 
 
@@ -1962,6 +2015,81 @@ async def run_events(dry_run=False, client=None):
             await client.disconnect()
 
 
+async def run_events_local(dry_run=False, client=None):
+    """
+    Modo EVENTS-LOCAL: logos PNG de EVENTS_LOCAL_URL (coordenadas fijas de
+    Buin, RM, Chile), todos al tema Iconos.
+
+    Misma vista Drupal por AJAX que la home (fetch_page), pero sin scroll
+    infinito real: se pide una sola vez (ver parse_events_local_page) porque
+    la vista wwe_ticktes no pagina, siempre devuelve el mismo listado
+    completo de "proximos eventos" cercanos a esas coordenadas.
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        try:
+            r = session.get(EVENTS_LOCAL_URL, timeout=30)
+            r.raise_for_status()
+            m = re.search(r"js-view-dom-id-([0-9a-f]{16,})", r.text)
+            dom_id = m.group(1) if m else ""
+        except requests.RequestException as e:
+            log.error("No se pudo abrir events-local: %s", e)
+            return 0
+
+        try:
+            markup = fetch_page(session, dom_id, 0, view=EVENTS_LOCAL_VIEW,
+                                display=EVENTS_LOCAL_DISPLAY,
+                                path=EVENTS_LOCAL_PATH)
+        except RuntimeError as e:
+            log.error("No se pudo leer events-local: %s", e)
+            return 0
+
+        logos = parse_events_local_page(markup)
+        nuevos = [it for it in logos if not already_seen(conn, it["cid"])]
+        log.info("Events-local: %d logos, %d nuevos.", len(logos), len(nuevos))
+        if not nuevos:
+            return 0
+
+        if dry_run:
+            for it in nuevos:
+                log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
+            return 0
+
+        if client is None:
+            client = await get_client()
+        group = await ensure_group(client)
+        topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        enviados = 0
+        for it in nuevos:
+            path = download_image(session, it)
+            if not path:
+                log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                record(conn, it, False)
+                continue
+            try:
+                ok = await publish(client, group, topics[it["topic"]], path, it)
+            finally:
+                path.unlink(missing_ok=True)
+            record(conn, it, ok)
+            if ok:
+                enviados += 1
+                log.info("Publicado [%s] %s", it["topic"], it["title"][:60])
+            await asyncio.sleep(SEND_DELAY)
+
+        log.info("Events-local: %d publicados de %d nuevos.", enviados, len(nuevos))
+        return enviados
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
 async def run_backfill(limit=0, start_page=None, dry_run=False, client=None):
     """
     Volcado del archivo historico, pagina a pagina y REANUDABLE.
@@ -2278,6 +2406,8 @@ async def amain(args):
         modos = ["shows"]
     elif args.events:
         modos = ["events"]
+    elif args.events_local:
+        modos = ["events_local"]
     else:
         modos = ["photos" if args.photos else "feed"]
     try:
@@ -2299,6 +2429,8 @@ async def amain(args):
             await run_shows(args.dry_run)
         elif args.events:
             await run_events(args.dry_run)
+        elif args.events_local:
+            await run_events_local(args.dry_run)
         elif args.photos:
             await run_photos(args.limit, args.from_page, args.dry_run)
         elif args.backfill:
@@ -2341,6 +2473,11 @@ def main():
                     help="MODO EVENTS: revisa /events/ (proximos eventos, "
                          "geolocalizado) y publica los que falten. Sin "
                          "archivo historico, solo vigilancia de novedades.")
+    ap.add_argument("--events-local", action="store_true",
+                    help="MODO EVENTS-LOCAL: revisa la landing de proximos "
+                         "eventos con coordenadas fijas (Buin, RM, Chile) y "
+                         "publica el logo PNG de cada evento al tema "
+                         "Iconos. Sin archivo historico, solo vigilancia.")
     ap.add_argument("--backfill", action="store_true",
                     help="volcado del archivo historico (~22.200 items), "
                          "reanudable: al relanzar sigue donde iba")
