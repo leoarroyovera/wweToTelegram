@@ -1022,7 +1022,8 @@ def human(n):
 def download_to(session, item, dest):
     """
     Baja la imagen de 'item' a 'dest'. Intenta el original y cae al preset
-    si no esta disponible. Devuelve True si quedo un archivo con contenido.
+    si no esta disponible. Devuelve la URL que realmente se descargo, o None
+    si fallaron ambas.
     """
     for label, url in (("original", item["image"]),
                        ("preset", item.get("image_fallback"))):
@@ -1035,12 +1036,12 @@ def download_to(session, item, dest):
                     for chunk in r.iter_content(1 << 16):
                         f.write(chunk)
             if dest.stat().st_size > 0:
-                return True
+                return url
             dest.unlink(missing_ok=True)
         except (requests.RequestException, OSError) as e:
             log.warning("Descarga fallo (%s): %s", label, e)
             dest.unlink(missing_ok=True)
-    return False
+    return None
 
 
 def safe_name(cid, ext):
@@ -1070,12 +1071,20 @@ def download_image(session, item):
     """
     Descarga la imagen a disco: Telethon necesita un archivo local, no acepta
     una URL remota como si hacia la Bot API. Devuelve la ruta o None.
+
+    De paso anota en el item la URL que realmente se descargo (original o
+    fallback), en "image_used", para poder incluirla en el caption sin tener
+    que volver a decidir cual de las dos funciono.
     """
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     url = item["image"] or item.get("image_fallback") or ""
     ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
     dest = WORK_DIR / safe_name(item["cid"], ext)
-    return dest if download_to(session, item, dest) else None
+    usada = download_to(session, item, dest)
+    if not usada:
+        return None
+    item["image_used"] = usada
+    return dest
 
 
 # ==========================================================================
@@ -1190,6 +1199,12 @@ def build_caption(item):
         cap += "\n" + " ".join(tags)
     if item["url"]:
         cap += '\n\n<a href="%s">Ver en WWE.com</a>' % html.escape(item["url"])
+    # URL de la imagen realmente descargada (original o fallback, la que
+    # haya funcionado); si no se registro por alguna razon, se usa la URL
+    # "original" tal cual se raspo, para no dejar el caption sin ella.
+    img_url = item.get("image_used") or item["image"] or item.get("image_fallback")
+    if img_url:
+        cap += '\n<a href="%s">Imagen</a>' % html.escape(img_url)
     return cap[:CAPTION_MAX]
 
 
