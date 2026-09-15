@@ -387,10 +387,20 @@ def db_connect():
             show         TEXT,
             topic        TEXT,
             first_seen   TEXT,
-            sent         INTEGER DEFAULT 0
+            sent         INTEGER DEFAULT 0,
+            message_id   INTEGER,
+            quality      TEXT
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_first_seen ON seen(first_seen)")
+    # Columnas agregadas despues del primer despliegue: SQLite no tiene
+    # "ADD COLUMN IF NOT EXISTS", asi que se agregan a mano si faltan, para
+    # no romper una base de datos ya existente en produccion.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(seen)")}
+    if "message_id" not in cols:
+        conn.execute("ALTER TABLE seen ADD COLUMN message_id INTEGER")
+    if "quality" not in cols:
+        conn.execute("ALTER TABLE seen ADD COLUMN quality TEXT")
     # Progreso del volcado historico (--backfill), para reanudarlo por tandas.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backfill (
@@ -442,24 +452,51 @@ def already_seen(conn, cid):
     return r is not None and r[0] == 1
 
 
-def record(conn, item, sent):
+def pending_quality(conn, cid):
+    """
+    True si cid ya se publico pero con la imagen 'temp' (preset, no el
+    original sin perdida): sigue pendiente de mejora, no de primera subida.
+
+    Se usa en superstars para distinguir "nunca se publico" (already_seen
+    devuelve False) de "se publico pero hay que reintentar el original y
+    editar el mensaje" (already_seen devuelve True, pending_quality tambien).
+    """
+    r = conn.execute("SELECT quality FROM seen WHERE cid=?", (cid,)).fetchone()
+    return r is not None and r[0] == "temp"
+
+
+def get_message_id(conn, cid):
+    r = conn.execute("SELECT message_id FROM seen WHERE cid=?", (cid,)).fetchone()
+    return r[0] if r else None
+
+
+def record(conn, item, sent, message_id=None, quality=None):
     """
     Guarda el resultado de intentar publicar un item.
 
     first_seen se preserva si ya existia una fila previa (un reintento tras
     un sent=0 no debe resetear su fecha de primera vista, o purge_old()
     nunca lo alcanzaria si el reintento lo sigue posponiendo indefinidamente).
+
+    message_id/quality: para items que pueden publicarse con calidad
+    'temp' (preset) y mejorarse despues editando el mismo mensaje cuando el
+    original este disponible (ver run_superstars). Si no se pasan, se
+    conserva message_id previo (una llamada que no sabe de calidad, como
+    record(conn, item, False), no debe borrar el id de un mensaje ya
+    publicado).
     """
-    previo = conn.execute("SELECT first_seen FROM seen WHERE cid=?",
+    previo = conn.execute("SELECT first_seen, message_id FROM seen WHERE cid=?",
                           (item["cid"],)).fetchone()
     first_seen = previo[0] if previo else datetime.now(timezone.utc).isoformat()
+    if message_id is None and previo:
+        message_id = previo[1]
     conn.execute(
         "INSERT OR REPLACE INTO seen "
-        "(cid,title,url,image,content_type,show,topic,first_seen,sent) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "(cid,title,url,image,content_type,show,topic,first_seen,sent,"
+        "message_id,quality) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (item["cid"], item["title"], item["url"], item["image"],
          item["content_type"], item["show"], item["topic"],
-         first_seen, 1 if sent else 0))
+         first_seen, 1 if sent else 0, message_id, quality))
     conn.commit()
 
 
@@ -1072,14 +1109,20 @@ def human(n):
         n /= 1024.0
 
 
-def download_to(session, item, dest):
+def download_to(session, item, dest, only_original=False):
     """
     Baja la imagen de 'item' a 'dest'. Intenta el original y cae al preset
     si no esta disponible. Devuelve la URL que realmente se descargo, o None
     si fallaron ambas.
+
+    only_original: no caer al preset. Se usa para reintentar la mejora de
+    un item que ya se publico con el preset (ver run_superstars): si el
+    original sigue sin estar disponible, no tiene sentido volver a bajar el
+    mismo preset que ya se subio.
     """
-    for label, url in (("original", item["image"]),
-                       ("preset", item.get("image_fallback"))):
+    candidatos = (("original", item["image"]),) if only_original else (
+        ("original", item["image"]), ("preset", item.get("image_fallback")))
+    for label, url in candidatos:
         if not url:
             continue
         try:
@@ -1120,7 +1163,7 @@ def safe_name(cid, ext):
     return base + ext
 
 
-def download_image(session, item):
+def download_image(session, item, only_original=False):
     """
     Descarga la imagen a disco: Telethon necesita un archivo local, no acepta
     una URL remota como si hacia la Bot API. Devuelve la ruta o None.
@@ -1133,7 +1176,7 @@ def download_image(session, item):
     url = item["image"] or item.get("image_fallback") or ""
     ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
     dest = WORK_DIR / safe_name(item["cid"], ext)
-    usada = download_to(session, item, dest)
+    usada = download_to(session, item, dest, only_original=only_original)
     if not usada:
         return None
     item["image_used"] = usada
@@ -1262,18 +1305,23 @@ def build_caption(item):
 
 
 async def publish(client, group, topic_id, path, item):
-    """Sube la imagen al tema correspondiente, respetando los FloodWait."""
+    """
+    Sube la imagen al tema correspondiente, respetando los FloodWait.
+    Devuelve el Message enviado, o False si fallo.
+    """
     # Telegram no acepta SVG como foto embebida (solo Telethon lo intentaria
     # igual y el servidor lo rechaza o lo entrega sin preview): los iconos
     # van como documento, ademas preserva el archivo original sin recomprimir.
-    as_doc = item["content_type"] == "icon"
+    # Las superstars tambien van como documento: son la foto de perfil de
+    # cada luchador y el objetivo es archivarla sin perdida (ver
+    # run_superstars), no verla como preview de chat.
+    as_doc = item["content_type"] in ("icon", "superstar")
     for _ in range(MAX_RETRIES):
         try:
-            await client.send_file(
+            return await client.send_file(
                 group, str(path), caption=build_caption(item),
                 parse_mode="html", reply_to=topic_id,
                 force_document=as_doc)
-            return True
         except FloodWaitError as e:
             log.warning("FloodWait al publicar: %ds", e.seconds)
             await asyncio.sleep(e.seconds + 5)
@@ -1281,6 +1329,29 @@ async def publish(client, group, topic_id, path, item):
             log.warning("Fallo al publicar cid=%s: %s", item["cid"], e)
             await asyncio.sleep(5)
     log.error("No se pudo publicar cid=%s", item["cid"])
+    return False
+
+
+async def edit_media(client, group, message_id, path, item):
+    """
+    Reemplaza el archivo de un mensaje ya publicado (ver run_superstars:
+    mejora de 'temp' a original sin editar dos veces el mismo luchador).
+    Devuelve el Message editado, o False si fallo.
+    """
+    for _ in range(MAX_RETRIES):
+        try:
+            return await client.edit_message(
+                group, message_id, file=str(path),
+                text=build_caption(item), parse_mode="html",
+                force_document=True)
+        except FloodWaitError as e:
+            log.warning("FloodWait al editar: %ds", e.seconds)
+            await asyncio.sleep(e.seconds + 5)
+        except Exception as e:
+            log.warning("Fallo al editar cid=%s (mid=%s): %s",
+                        item["cid"], message_id, e)
+            await asyncio.sleep(5)
+    log.error("No se pudo editar cid=%s (mid=%s)", item["cid"], message_id)
     return False
 
 
@@ -1846,27 +1917,65 @@ async def run_superstars(limit=0, start_page=None, dry_run=False, client=None):
             vacias = 0
 
             nuevos = [it for it in luchadores if not already_seen(conn, it["cid"])]
-            log.info("Pagina %d: %d luchadores, %d nuevos (total: %d)",
-                     page, len(luchadores), len(nuevos), hechos)
+            # Publicados antes pero solo con la version 'temp' (preset): se
+            # reintenta el original en cada pasada, aunque ya no cuenten
+            # como "nuevos", hasta conseguirlo y mejorar el mensaje.
+            pendientes = [it for it in luchadores
+                         if already_seen(conn, it["cid"])
+                         and pending_quality(conn, it["cid"])]
+            log.info("Pagina %d: %d luchadores, %d nuevos, %d pendientes de "
+                     "calidad maxima (total: %d)",
+                     page, len(luchadores), len(nuevos), len(pendientes), hechos)
 
             for it in nuevos:
                 if dry_run:
                     log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
                     continue
 
+                # Solo el original cuenta como calidad final: si cae al
+                # preset, se publica igual (mejor un perfil temporal que
+                # ninguno) pero queda marcado 'temp' para que la proxima
+                # pasada seguida siga preguntando por el original.
                 path = download_image(session, it)
+                usando_preset = path and it.get("image_used") == it.get("image_fallback")
                 if not path:
                     log.error("Sin imagen para %s; se marca como visto.", it["cid"])
                     record(conn, it, False)
                     continue
                 try:
-                    ok = await publish(client, group, topics[it["topic"]], path, it)
+                    msg = await publish(client, group, topics[it["topic"]], path, it)
                 finally:
                     path.unlink(missing_ok=True)
-                record(conn, it, ok)
-                if ok:
+                record(conn, it, msg, message_id=(msg.id if msg else None),
+                      quality=("temp" if (msg and usando_preset) else
+                               ("final" if msg else None)))
+                if msg:
                     hechos += 1
                     bf_set(conn, "superstars_total", hechos)
+                    if usando_preset:
+                        log.warning("%s: se publico con calidad temporal "
+                                   "(preset); se reintentara el original.",
+                                   it["cid"])
+                await asyncio.sleep(SEND_DELAY)
+
+            for it in pendientes:
+                if dry_run:
+                    continue
+                mid = get_message_id(conn, it["cid"])
+                if not mid:
+                    continue
+                path = download_image(session, it, only_original=True)
+                if not path:
+                    # Original todavia no disponible: sigue 'temp', se
+                    # reintenta en la proxima pasada sin volver a publicar.
+                    continue
+                try:
+                    msg = await edit_media(client, group, mid, path, it)
+                finally:
+                    path.unlink(missing_ok=True)
+                if msg:
+                    record(conn, it, True, message_id=mid, quality="final")
+                    log.info("%s: mejorado a calidad original.", it["cid"])
                 await asyncio.sleep(SEND_DELAY)
 
             page += 1
