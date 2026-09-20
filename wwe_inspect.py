@@ -24,6 +24,9 @@ Uso:
     python3 wwe_inspect.py --seen           # compara contra wwe_seen.sqlite3
                                              # (si existe) para marcar lo ya
                                              # publicado antes
+    python3 wwe_inspect.py --urls-only      # solo imprime, una por linea,
+                                             # las URLs de imagen (original y
+                                             # fallback) de lo seleccionado
 """
 
 import argparse
@@ -143,23 +146,28 @@ def main():
                          "wwe_seen.sqlite3 (si existe).")
     ap.add_argument("--json", action="store_true",
                     help="Salida en JSON en vez de texto legible.")
+    ap.add_argument("--urls-only", action="store_true",
+                    help="Solo imprime las URLs de imagen (original y "
+                         "fallback si existe) de los items seleccionados, "
+                         "una por linea. Ignora --json y --top.")
     ap.add_argument("--top", type=int, default=None,
                     help="Cuantos items listar en el detalle (default: todos "
                          "los seleccionados + primeros 10 descartados).")
     args = ap.parse_args()
 
     session = new_session()
+    quieto = args.json or args.urls_only
 
-    if not args.json:
+    if not quieto:
         print()
         linea("=")
         print(" WWE.com -> diagnostico de portada (solo lectura)")
         linea("=")
 
-    if not args.json:
+    if not quieto:
         print("\nResolviendo view_dom_id de la home...")
     dom_id = get_view_dom_id(session)
-    if not args.json:
+    if not quieto:
         print("  view_dom_id = %r" % dom_id)
         linea()
         print("PASO 1: QUE OBTIENE (home + %d pagina/s del scroll)\n"
@@ -167,7 +175,7 @@ def main():
 
     items, fuentes = recolectar(session, dom_id, args.pages,
                                 loose_images=not args.no_loose,
-                                verbose=not args.json)
+                                verbose=not quieto)
 
     primer_run = is_first_run(db_connect()) if Path(DB_PATH).exists() else True
     vistos = marcar_vistos(items) if args.seen else {}
@@ -181,6 +189,14 @@ def main():
     limite = FIRST_RUN_SEND if primer_run else MAX_SEND_PER_RUN
     seleccionados = ordenados[:limite]
     descartados = ordenados[limite:]
+
+    if args.urls_only:
+        for it in seleccionados:
+            if it["image"]:
+                print(it["image"])
+            if it.get("image_fallback"):
+                print(it["image_fallback"])
+        return
 
     if args.json:
         salida = {

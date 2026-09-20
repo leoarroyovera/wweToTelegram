@@ -2434,6 +2434,293 @@ async def run_backfill_all(dry_run=False):
             await client.disconnect()
 
 
+async def run_photos_sweep(dry_run=False, client=None):
+    """
+    Vigilancia de galerias NUEVAS en /photos, para cuando el backfill
+    historico (run_photos) ya termino y solo interesa lo que se publique de
+    ahora en adelante.
+
+    A diferencia de run_photos (que avanza 'photos_page' pagina a pagina y
+    nunca vuelve atras), esto SIEMPRE arranca en la pagina 0 -- que es
+    "lo mas reciente primero" en /photos -- y no toca el progreso de
+    backfill. Se detiene en la primera pagina sin ninguna galeria nueva:
+    como el listado esta ordenado por fecha, si una pagina completa ya
+    estaba vista, las siguientes (mas viejas) tambien lo estaran.
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        try:
+            r = session.get(BASE_URL + "/photos", timeout=30)
+            r.raise_for_status()
+            m = re.search(r"js-view-dom-id-([0-9a-f]{16,})", r.text)
+            dom_id = m.group(1) if m else ""
+        except requests.RequestException as e:
+            log.error("No se pudo abrir /photos: %s", e)
+            return 0
+
+        topics = None
+        if not dry_run:
+            if client is None:
+                client = await get_client()
+            group = await ensure_group(client)
+            topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        page, hechas = 0, 0
+        while True:
+            try:
+                markup = fetch_page(session, dom_id, page, view=PHOTOS_VIEW,
+                                    display=PHOTOS_DISPLAY, path=PHOTOS_PATH)
+            except RuntimeError as e:
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                continue
+
+            galerias = parse_photos_page(markup)
+            if not galerias:
+                log.info("Photos-sweep: pagina %d vacia; fin.", page)
+                break
+
+            nuevas = [g for g in galerias
+                      if not already_seen(conn, "gal:" + g["url"])]
+            log.info("Photos-sweep: pagina %d, %d galerias, %d nuevas.",
+                     page, len(galerias), len(nuevas))
+            if not nuevas:
+                break
+
+            for gal in nuevas:
+                if dry_run:
+                    log.info("[DRY-RUN] %-11s | %s", gal["topic"],
+                             gal["title"][:62])
+                    continue
+
+                nid = resolve_gallery_nid(session, gal["url"])
+                if not nid:
+                    log.warning("Sin nid para %s; la salto.", gal["url"])
+                    gal["cid"] = "gal:" + gal["url"]
+                    record(conn, gal, False)
+                    continue
+
+                gal["cid"] = nid
+                ok = await publish_gallery(client, group, topics, session,
+                                           conn, gal, dry_run)
+                marca = dict(gal, cid="gal:" + gal["url"])
+                record(conn, marca, bool(ok))
+                record(conn, gal, bool(ok))
+                if ok:
+                    hechas += 1
+                await asyncio.sleep(SEND_DELAY)
+
+            page += 1
+            time.sleep(1.0)  # cortesia con el servidor
+
+        log.info("Photos-sweep: %d galerias nuevas publicadas.", hechas)
+        return hechas
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
+async def run_superstars_sweep(dry_run=False, client=None):
+    """
+    Vigilancia de superstars NUEVOS en /superstars, analoga a
+    run_photos_sweep pero para el listado de luchadores.
+
+    /superstars no esta ordenado por fecha como /photos (ver run_superstars:
+    "0% de solapamiento entre paginas", orden fijo del listado), asi que un
+    luchador nuevo puede caer en cualquier pagina, no solo la 0. Por eso
+    esto SIEMPRE recorre el listado completo (como run_superstars con
+    limit=0) en vez de cortar en la primera pagina sin novedades -- es mas
+    lento que el sweep de fotos, pero /superstars es un listado chico
+    (unos pocos cientos de luchadores) asi que recorrerlo entero cada vez
+    es barato. No toca el progreso de backfill ('superstars_page').
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        try:
+            r = session.get(BASE_URL + SUPERSTARS_PATH, timeout=30)
+            r.raise_for_status()
+            m = re.search(r"js-view-dom-id-([0-9a-f]{16,})", r.text)
+            dom_id = m.group(1) if m else ""
+        except requests.RequestException as e:
+            log.error("No se pudo abrir %s: %s", SUPERSTARS_PATH, e)
+            return 0
+
+        topics = None
+        if not dry_run:
+            if client is None:
+                client = await get_client()
+            group = await ensure_group(client)
+            topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        page, hechos, vacias = 0, 0, 0
+        while True:
+            try:
+                markup = fetch_page(session, dom_id, page,
+                                    view=SUPERSTARS_VIEW,
+                                    display=SUPERSTARS_DISPLAY,
+                                    path=SUPERSTARS_PATH)
+            except RuntimeError as e:
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                continue
+
+            luchadores = parse_superstars_page(markup)
+            if not luchadores:
+                vacias += 1
+                if vacias >= 2:
+                    log.info("Superstars-sweep: pagina %d vacia dos veces; "
+                             "fin.", page)
+                    break
+                page += 1
+                continue
+            vacias = 0
+
+            nuevos = [it for it in luchadores if not already_seen(conn, it["cid"])]
+            pendientes = [it for it in luchadores
+                         if already_seen(conn, it["cid"])
+                         and pending_quality(conn, it["cid"])]
+            log.info("Superstars-sweep: pagina %d, %d luchadores, %d nuevos, "
+                     "%d pendientes de calidad maxima.",
+                     page, len(luchadores), len(nuevos), len(pendientes))
+
+            for it in nuevos:
+                if dry_run:
+                    log.info("[DRY-RUN] %-11s | %s", it["topic"], it["title"][:62])
+                    continue
+
+                path = download_image(session, it)
+                usando_preset = path and it.get("image_used") == it.get("image_fallback")
+                if not path:
+                    log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                    record(conn, it, False)
+                    continue
+                try:
+                    msg = await publish(client, group, topics[it["topic"]], path, it)
+                finally:
+                    path.unlink(missing_ok=True)
+                record(conn, it, msg, message_id=(msg.id if msg else None),
+                      quality=("temp" if (msg and usando_preset) else
+                               ("final" if msg else None)))
+                if msg:
+                    hechos += 1
+                    if usando_preset:
+                        log.warning("%s: se publico con calidad temporal "
+                                   "(preset); se reintentara el original.",
+                                   it["cid"])
+                await asyncio.sleep(SEND_DELAY)
+
+            for it in pendientes:
+                if dry_run:
+                    continue
+                mid = get_message_id(conn, it["cid"])
+                if not mid:
+                    continue
+                path = download_image(session, it, only_original=True)
+                if not path:
+                    continue
+                try:
+                    msg = await edit_media(client, group, mid, path, it)
+                finally:
+                    path.unlink(missing_ok=True)
+                if msg:
+                    record(conn, it, True, message_id=mid, quality="final")
+                    log.info("%s: mejorado a calidad original.", it["cid"])
+                await asyncio.sleep(SEND_DELAY)
+
+            page += 1
+            time.sleep(1.0)  # cortesia con el servidor
+
+        log.info("Superstars-sweep: %d superstars nuevos publicados.", hechos)
+        return hechos
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
+WATCH_INTERVAL_SECONDS = int(os.environ.get("WWE_WATCH_INTERVAL", "300"))
+
+# Cada cuantas vueltas del loop de --watch se revisan galerias/superstars
+# completos y shows/events/events-local. La portada (run_once) se revisa en
+# TODAS las vueltas porque es la fuente con mas volumen y frecuencia de
+# novedades; el resto cambia mucho menos seguido, asi que espaciarlo evita
+# golpear /photos y /superstars sin necesidad (el sweep de superstars
+# recorre el listado completo cada vez, ver run_superstars_sweep).
+WATCH_SWEEP_CADA_VUELTAS = 6
+
+
+async def run_watch(dry_run=False):
+    """
+    MODO WATCH: vigilancia continua e indefinida de TODO lo que WWE.com
+    publica, pensada para dejarla como unico always-on task DESPUES de que
+    el backfill historico (--backfill-all) ya termino.
+
+    A diferencia de --backfill-all (que alterna con avance de solo ida por
+    el archivo historico y de paso intercala novedades), --watch asume que
+    ya no hay archivo historico pendiente: en cada vuelta revisa, siempre
+    desde cero, las seis fuentes de contenido:
+
+      - portada (run_once): home + paginas del scroll infinito.
+      - galerias nuevas (run_photos_sweep): pagina 0 de /photos en adelante,
+        hasta la primera pagina sin novedades.
+      - superstars nuevos (run_superstars_sweep): listado completo de
+        /superstars (no esta ordenado por fecha, ver esa funcion).
+      - shows (run_shows), events (run_events) y events-local
+        (run_events_local): hubs sin archivo historico, se revisan enteros.
+
+    Nunca termina ni corta por un error puntual, igual que --backfill-all:
+    cualquier excepcion en una fuente se loguea y se sigue con las demas.
+    """
+    client = None
+    try:
+        if not dry_run:
+            client = await get_client()
+
+        vuelta = 0
+        while True:
+            vuelta += 1
+            log.info("Watch: vuelta #%d.", vuelta)
+
+            try:
+                await run_once(dry_run=dry_run, client=client)
+            except Exception:
+                log.exception("Watch: error revisando portada; sigo.")
+
+            if vuelta % WATCH_SWEEP_CADA_VUELTAS == 0:
+                try:
+                    await run_photos_sweep(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Watch: error revisando galerias; sigo.")
+
+                try:
+                    await run_superstars_sweep(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Watch: error revisando superstars; sigo.")
+
+                try:
+                    await run_shows(dry_run=dry_run, client=client)
+                    await run_events(dry_run=dry_run, client=client)
+                    await run_events_local(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Watch: error revisando shows/eventos; sigo.")
+
+            await asyncio.sleep(WATCH_INTERVAL_SECONDS)
+    finally:
+        if client:
+            await client.disconnect()
+
+
 async def do_login():
     """Login interactivo; deja la sesion lista para las tareas programadas."""
     client = await get_client()
@@ -2503,11 +2790,12 @@ async def amain(args):
         return await do_login()
 
     # Un lock por modo: cada uno es independiente y pueden correr a la vez
-    # sin pisarse. --backfill-all toma los tres que tienen archivo historico
-    # paginable (feed/photos/superstars), porque alterna entre ellos y no
-    # deberia convivir con --backfill/--photos/--superstars sueltos pisando
-    # el mismo progreso a la vez.
-    if args.backfill_all:
+    # sin pisarse. --backfill-all y --watch toman los tres que tienen
+    # archivo historico paginable (feed/photos/superstars), porque tocan
+    # los tres (uno alternando tandas de backfill, el otro barriendo
+    # novedades) y no deberian convivir con --backfill/--photos/
+    # --superstars sueltos pisando el mismo progreso a la vez.
+    if args.backfill_all or args.watch:
         modos = ["feed", "photos", "superstars"]
     elif args.superstars:
         modos = ["superstars"]
@@ -2532,6 +2820,10 @@ async def amain(args):
             log.info("Modo backfill-all: portada + galerias + superstars "
                      "hasta el final de las tres.")
             await run_backfill_all(args.dry_run)
+        elif args.watch:
+            log.info("Modo watch: vigilancia continua de portada, "
+                     "galerias, superstars, shows, events y events-local.")
+            await run_watch(args.dry_run)
         elif args.superstars:
             await run_superstars(args.limit, args.from_page, args.dry_run)
         elif args.shows:
@@ -2597,6 +2889,13 @@ def main():
                          "shows/events). Pensado para dejarlo como unico "
                          "always-on task, corriendo indefinidamente (nunca "
                          "corta por un error puntual)")
+    ap.add_argument("--watch", action="store_true",
+                    help="MODO WATCH: vigilancia continua e indefinida, "
+                         "pensada para DESPUES de que --backfill-all ya "
+                         "termino el historico. En cada vuelta revisa "
+                         "portada, galerias nuevas, superstars nuevos, "
+                         "shows, events y events-local. Unico always-on "
+                         "task (nunca corta por un error puntual)")
     ap.add_argument("--limit", type=int, default=0, metavar="N",
                     help="con --backfill/--photos/--superstars: paginas por "
                          "tanda (0 = sin limite)")
