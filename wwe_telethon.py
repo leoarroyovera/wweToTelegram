@@ -1315,7 +1315,11 @@ async def publish(client, group, topic_id, path, item):
     # Las superstars tambien van como documento: son la foto de perfil de
     # cada luchador y el objetivo es archivarla sin perdida (ver
     # run_superstars), no verla como preview de chat.
-    as_doc = item["content_type"] in ("icon", "superstar")
+    # Y cualquier PNG/SVG, sea del tema que sea (Shows, Eventos, Otros...):
+    # como foto Telegram lo recomprime a JPEG y pierde calidad y la
+    # transparencia del logo.
+    as_doc = (item["content_type"] in ("icon", "superstar")
+              or _must_go_as_document(path))
     for _ in range(MAX_RETRIES):
         try:
             return await client.send_file(
@@ -1353,6 +1357,27 @@ async def edit_media(client, group, message_id, path, item):
             await asyncio.sleep(5)
     log.error("No se pudo editar cid=%s (mid=%s)", item["cid"], message_id)
     return False
+
+
+def _must_go_as_document(path):
+    """
+    True si path es PNG o SVG: se sube como archivo y no como foto, porque
+    Telegram recomprime las fotos a JPEG (pierde calidad y transparencia).
+
+    Se mira la firma del archivo y no solo la extension: download_to() puede
+    haber caido al preset, y la URL no siempre dice lo que realmente se bajo.
+    """
+    path = Path(path)
+    if path.suffix.lower() in (".png", ".svg"):
+        return True
+    try:
+        with open(path, "rb") as f:
+            cabecera = f.read(256)
+    except OSError:
+        return False
+    if cabecera.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    return b"<svg" in cabecera.lower()
 
 
 def _photo_dims_invalid(path):
@@ -1438,6 +1463,20 @@ async def send_media(client, group, topic_id, paths, caption,
     # tira TODO el album junto (PHOTO_INVALID_DIMENSIONS). Se filtran antes
     # de intentar, para no perder las demas fotos del grupo por esta.
     if not as_document:
+        # PNG/SVG: como foto se recomprimirian a JPEG. Telegram no mezcla
+        # fotos y documentos en un mismo album, asi que van aparte, en su
+        # propio album de documentos y con el mismo pie.
+        docs = [p for p in paths if _must_go_as_document(p)]
+        if docs:
+            log.info("%d PNG/SVG del album van como documento: %s",
+                     len(docs), ", ".join(p.name for p in docs))
+            paths = [p for p in paths if p not in docs]
+            enviado_doc = await send_media(client, group, topic_id, docs,
+                                           caption, as_document=True)
+            if not paths:
+                return enviado_doc
+            await asyncio.sleep(SEND_DELAY)
+
         invalidas = [p for p in paths if _photo_dims_invalid(p)]
         if invalidas:
             log.warning("%d foto(s) con dimensiones invalidas, van como "
