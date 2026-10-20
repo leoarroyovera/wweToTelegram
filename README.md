@@ -117,6 +117,45 @@ python wwe_telethon.py --backfill-all   # portada + galerias + superstars
                                          # intercalando shows y events
 ```
 
+## Bot de control
+
+`wwe_bot.py` es un bot de Telegram (cuenta de bot, sesión propia
+`wwe_bot.session`) para manejar el proyecto desde el chat. No publica nada:
+lanza y detiene los modos de `wwe_telethon.py` como subprocesos y lee su
+estado de `wwe_seen.sqlite3` y `wwe_telethon.log`.
+
+1. Crea el bot con [@BotFather](https://t.me/BotFather) y pon el token en
+   `WWE_BOT_TOKEN` del `.env`.
+2. `python wwe_bot.py` y mándale `/start`: si aún no estás autorizado te
+   responde con tu id. Ponlo en `WWE_BOT_ADMINS` y reinicia el bot.
+
+| Comando | Qué hace |
+|---|---|
+| `/menu` | Menú con botones de todas las opciones |
+| `/estado` | Progreso de cada modo, procesos lanzados y locks activos |
+| `/log [n]` | Las **n últimas imágenes cargadas** (defecto 10, máx. 100), con enlace al mensaje y a la imagen |
+| `/tail [n]` | Las n últimas líneas de `wwe_telethon.log` |
+| `/run <modo>` | Lanza `portada`, `watch`, `photos`, `superstars`, `shows`, `events`, `events-local`, `backfill-all`, `calidad` o `dry-run` |
+| `/stop <modo>` | Detiene un modo lanzado desde el bot |
+| `/calidad` | Reintenta el original de lo subido con el preset de respaldo |
+
+Los comandos aparecen también en el botón **Menú** del chat. Cuando un
+proceso termina, el bot avisa a los admins (con el traceback si falló).
+Con `WWE_BOT_AUTOSTART=watch` el bot lanza la vigilancia al arrancar, así
+que puede ser el único always-on task de PythonAnywhere.
+
+Desde consola, `python wwe_telethon.py --recent 20` muestra lo mismo que `/log 20`.
+
+### Calidad máxima siempre
+
+Toda descarga pasa por `download_to()`, que quita `/styles/<preset>/public`
+de la URL antes de bajarla (`strip_style()`), sea cual sea el nombre del
+preset y sin importar qué parser la produjo. El preset solo se usa si el
+original falla; en ese caso la publicación queda con calidad `temp`, y
+`--upgrade-quality` (o `/calidad`, y también cada pocas vueltas de
+`--watch`) reintenta el original y **edita el mismo mensaje** cuando ya
+está disponible.
+
 ## Opciones (.env)
 
 | Variable | Defecto | Efecto |
@@ -141,6 +180,54 @@ límite se marca como visto sin publicar, para que no se acumule.
 > archivo antiguo está `--backfill`, que va por tandas y es reanudable.
 
 ---
+
+## Despliegue en un VPS (Oracle Cloud u otro Linux)
+
+Un solo servicio `systemd`, `wwe-bot`: arranca el bot de control y este
+lanza `--watch`, que revisa el sitio cada 5 min (`WWE_WATCH_INTERVAL`).
+Si `--watch` se cae, el bot lo relanza (10 s, 30 s, 1 min, 5 min, 10 min) y
+te avisa por Telegram; si se cae el bot, systemd lo reinicia; y arranca
+solo al reiniciar el VPS.
+
+**1. Código en el VPS** (usuario `ubuntu` en Ubuntu, `opc` en Oracle Linux):
+
+```bash
+git clone https://github.com/leoarroyovera/wweToTelegram.git ~/wweToTelegram
+```
+
+**2. Datos desde tu PC** (no están en git). En PowerShell:
+
+```powershell
+scp -i <tu-clave.key> .env wwe_session.session wwe_seen.sqlite3 ubuntu@<IP>:~/wweToTelegram/
+```
+
+- `wwe_seen.sqlite3` es **imprescindible**: es lo ya publicado. Sin él,
+  `--watch` volvería a subir todas las galerías y superstars.
+- `wwe_session.session` evita repetir el login. Si prefieres hacerlo de
+  nuevo: `.venv/bin/python wwe_telethon.py --login` (tras el paso 3).
+- **No dejes corriendo el script en tu PC a la vez**: dos procesos con la
+  misma sesión desde dos IPs pueden hacer que Telegram la invalide.
+- El `.env` debe traer `WWE_BOT_TOKEN` y `WWE_BOT_ADMINS`.
+
+**3. Instalación** (venv, dependencias y servicio):
+
+```bash
+cd ~/wweToTelegram && bash deploy/install.sh
+```
+
+**4. Comprobar**: mándale `/estado` al bot; debe aparecer `watch` lanzado.
+
+| | |
+|---|---|
+| Logs del servicio | `journalctl -u wwe-bot -f` |
+| Log del scraper | `tail -f ~/wweToTelegram/wwe_telethon.log` (o `/tail` en el bot) |
+| Reiniciar / parar | `sudo systemctl restart wwe-bot` / `sudo systemctl stop wwe-bot` |
+| Actualizar código | `git pull && sudo systemctl restart wwe-bot` |
+
+Solo hace falta tráfico de salida: no hay que abrir puertos en la *Security
+List* de Oracle. Ojo: `--events` resuelve la región por la IP, así que
+desde el VPS verá los eventos cercanos a su datacenter; `--events-local`
+usa coordenadas fijas y no cambia.
 
 ## Despliegue en PythonAnywhere
 

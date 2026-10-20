@@ -1,0 +1,24 @@
+# Plantilla: deploy/install.sh reemplaza __USER__ y __DIR__ y la instala en
+# /etc/systemd/system/wwe-bot.service.
+[Unit]
+Description=WWE to Telegram: bot de control + vigilancia continua (--watch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+Environment=PYTHONUNBUFFERED=1
+# El bot lanza --watch al arrancar y lo relanza si se cae. Manda sobre el .env.
+Environment=WWE_BOT_AUTOSTART=watch
+ExecStart=__DIR__/.venv/bin/python __DIR__/wwe_bot.py
+Restart=always
+RestartSec=15
+# SIGTERM solo al bot: el detiene a sus subprocesos con SIGINT para que
+# suelten sus locks. Lo que quede vivo pasado el timeout se mata.
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

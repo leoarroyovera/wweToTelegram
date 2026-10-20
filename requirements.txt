@@ -1,0 +1,5 @@
+telethon>=1.36
+requests>=2.31
+# Lo usa send_media para validar dimensiones: sin Pillow, toda foto de un
+# album se trataria como invalida y saldria como documento.
+pillow>=10

@@ -352,14 +352,43 @@ def lock_path(modo="feed"):
     return ROOT / ("wwe_telethon.%s.lock" % modo)
 
 
+def pid_alive(pid):
+    """
+    True/False si se puede saber si el proceso vive; None si no (Windows,
+    donde os.kill(pid, 0) no sirve para esto).
+    """
+    if os.name == "nt":
+        return None
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # existe, aunque sea de otro usuario
+    except (OSError, ValueError):
+        return None
+    return True
+
+
 def acquire_lock(modo="feed"):
+    """
+    El lock lo decide el pid que lo tomo, cuando se puede comprobar: --watch
+    y --backfill-all corren dias sin refrescar el archivo, asi que por edad
+    se darian por huerfanos a la hora y otro proceso se colaria sobre la
+    misma sesion; y tras un reinicio brusco del servidor, el lock del pid
+    muerto bloquearia ese modo una hora. La edad solo se usa si no se puede
+    saber si el pid vive.
+    """
     p = lock_path(modo)
     if p.exists():
+        pid = p.read_text().strip()
         age = time.time() - p.stat().st_mtime
-        if age < LOCK_STALE_SECONDS:
+        vivo = pid_alive(pid) if pid != str(os.getpid()) else False
+        if vivo or (vivo is None and age < LOCK_STALE_SECONDS):
             raise AlreadyRunning("lock '%s' activo (pid %s, %ds)"
-                                 % (modo, p.read_text().strip(), int(age)))
-        log.warning("Lock '%s' huerfano de %ds; se ignora.", modo, int(age))
+                                 % (modo, pid, int(age)))
+        log.warning("Lock '%s' huerfano (pid %s, %ds); se ignora.",
+                    modo, pid, int(age))
     p.write_text(str(os.getpid()))
     return p
 
@@ -401,6 +430,12 @@ def db_connect():
         conn.execute("ALTER TABLE seen ADD COLUMN message_id INTEGER")
     if "quality" not in cols:
         conn.execute("ALTER TABLE seen ADD COLUMN quality TEXT")
+    # Momento de la publicacion (first_seen es cuando se vio por primera
+    # vez, que puede ser muy anterior si quedo fuera del limite de una
+    # pasada). Lo usa el registro de "ultimas imagenes" del bot.
+    if "sent_at" not in cols:
+        conn.execute("ALTER TABLE seen ADD COLUMN sent_at TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_at ON seen(sent_at)")
     # Progreso del volcado historico (--backfill), para reanudarlo por tandas.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backfill (
@@ -485,18 +520,32 @@ def record(conn, item, sent, message_id=None, quality=None):
     record(conn, item, False), no debe borrar el id de un mensaje ya
     publicado).
     """
-    previo = conn.execute("SELECT first_seen, message_id FROM seen WHERE cid=?",
-                          (item["cid"],)).fetchone()
-    first_seen = previo[0] if previo else datetime.now(timezone.utc).isoformat()
+    previo = conn.execute(
+        "SELECT first_seen, message_id, sent_at FROM seen WHERE cid=?",
+        (item["cid"],)).fetchone()
+    ahora = datetime.now(timezone.utc).isoformat()
+    first_seen = previo[0] if previo else ahora
+    # sent puede ser el Message devuelto por publish(): de ahi sale el id
+    # para enlazar el mensaje y poder editarlo luego (run_upgrade_quality).
+    if message_id is None and sent and isinstance(getattr(sent, "id", None), int):
+        message_id = sent.id
     if message_id is None and previo:
         message_id = previo[1]
+    # Una re-grabacion (p.ej. al mejorar la calidad) no mueve la fecha de
+    # publicacion original.
+    sent_at = (previo[2] if previo and previo[2] else ahora) if sent else None
+    # Calidad: si no se indica, se deduce de la URL que realmente se bajo.
+    # 'temp' = se publico el preset porque el original fallo; queda en cola
+    # para run_upgrade_quality.
+    if quality is None and sent and item.get("image_used"):
+        quality = "final" if item["image_used"] == item["image"] else "temp"
     conn.execute(
         "INSERT OR REPLACE INTO seen "
         "(cid,title,url,image,content_type,show,topic,first_seen,sent,"
-        "message_id,quality) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "message_id,quality,sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (item["cid"], item["title"], item["url"], item["image"],
          item["content_type"], item["show"], item["topic"],
-         first_seen, 1 if sent else 0, message_id, quality))
+         first_seen, 1 if sent else 0, message_id, quality, sent_at))
     conn.commit()
 
 
@@ -593,6 +642,26 @@ CARD_RE = re.compile(
     re.S)
 
 
+# Derivado de Drupal: /styles/<preset>/public/. El nombre del preset admite
+# cualquier caracter salvo "/" (hay presets como 'wwe_1_1_540__composite' o
+# 'scaleto240with'); antes se exigia [a-z0-9_]+ y algun preset raro podia
+# colarse sin pelar.
+STYLE_RE = re.compile(r"/styles/[^/]+/public/")
+
+
+def strip_style(url):
+    """
+    URL de la imagen en calidad maxima: quita "/styles/<preset>/public" y
+    deja el original sin recomprimir (/f/styles/x/public/2026/a.jpg ->
+    /f/2026/a.jpg). Junto con el preset se va su firma ?itok=, que solo
+    vale para el derivado. Idempotente: una URL ya original no cambia.
+    """
+    if not url or not STYLE_RE.search(url):
+        return url
+    url = STYLE_RE.sub("/", url, count=1)
+    return re.sub(r"[?&]itok=[^&#]*", "", url)
+
+
 def image_urls(src):
     """
     Devuelve (original, preset) a partir de la URL del HTML.
@@ -602,10 +671,8 @@ def image_urls(src):
     dimensiones que el preset xl_r pero sin recomprimir (~1,7 MB vs ~375 KB).
     """
     src = html.unescape(src).replace("\\/", "/")
-    preset = re.sub(r"/f/styles/[a-z0-9_]+/public/",
-                    "/f/styles/%s/public/" % IMAGE_STYLE, src)
-    original = re.sub(r"/f/styles/[a-z0-9_]+/public/", "/f/", src)
-    return urljoin(BASE_URL, original), urljoin(BASE_URL, preset)
+    preset = STYLE_RE.sub("/styles/%s/public/" % IMAGE_STYLE, src, count=1)
+    return urljoin(BASE_URL, strip_style(src)), urljoin(BASE_URL, preset)
 
 
 def topic_for(item):
@@ -700,11 +767,10 @@ def parse_superstars_page(markup):
         img = re.search(r'<source srcset="([^"\s]+)', bloque)
         if not img:
             continue
-        preset = re.sub(r"/f/styles/[a-z0-9_]+(?:__composite)?/public/",
-                        "/f/styles/%s/public/" % SUPERSTAR_IMAGE_STYLE,
-                        html.unescape(img.group(1)))
-        original = re.sub(r"/f/styles/[a-z0-9_]+(?:__composite)?/public/",
-                          "/f/", html.unescape(img.group(1)))
+        crudo = html.unescape(img.group(1))
+        preset = STYLE_RE.sub("/styles/%s/public/" % SUPERSTAR_IMAGE_STYLE,
+                              crudo, count=1)
+        original = strip_style(crudo)
 
         it = {
             "cid": "superstar:" + slug,
@@ -975,7 +1041,7 @@ def parse_cards(markup):
         img = re.search(r'<img[^>]+src="([^"]+\.(?:jpg|jpeg|png))"', body, re.I)
         raw = img.group(1) if img else None
         if not raw:
-            img = re.search(r"/f/styles/[a-z0-9_]+/public/[^\"&\s\\]+\.jpg", body)
+            img = re.search(r"/f/styles/[^/\"]+/public/[^\"&\s\\]+\.jpg", body)
             raw = img.group(0) if img else None
         if not raw:
             continue
@@ -1075,9 +1141,14 @@ def scrape_loose_images(markup, source="portada"):
                 if "/f/" not in url:
                     continue  # fuera de /f/ solo hay assets del tema
 
-            original = urljoin(BASE_URL, url) if es_icono_png_svg else None
-            preset = original
-            if not es_icono_png_svg:
+            if es_icono_png_svg:
+                # Los iconos tambien pasan por su original: antes se subian
+                # con el preset tal cual (p.ej. 'medium', 36 KB frente a los
+                # 425 KB del PNG original). El preset encontrado queda de
+                # respaldo, en vez del generico de fotos 16:9.
+                preset = urljoin(BASE_URL, url.replace("\\/", "/"))
+                original = strip_style(preset)
+            else:
                 original, preset = image_urls(url)
             if original in vistas:
                 continue
@@ -1120,8 +1191,16 @@ def download_to(session, item, dest, only_original=False):
     original sigue sin estar disponible, no tiene sentido volver a bajar el
     mismo preset que ya se subio.
     """
-    candidatos = (("original", item["image"]),) if only_original else (
-        ("original", item["image"]), ("preset", item.get("image_fallback")))
+    # Punto unico por el que pasa TODA descarga (fotos sueltas, galerias,
+    # superstars, iconos): se vuelve a pelar el preset aqui por si algun
+    # parser nuevo lo dejo pasar, para no subir nunca un derivado como si
+    # fuera el original.
+    original = strip_style(item["image"])
+    if original != item["image"]:
+        log.warning("URL con preset sin pelar, corregida: %s", item["image"])
+        item["image"] = original
+    candidatos = (("original", original),) if only_original else (
+        ("original", original), ("preset", item.get("image_fallback")))
     for label, url in candidatos:
         if not url:
             continue
@@ -1132,6 +1211,9 @@ def download_to(session, item, dest, only_original=False):
                     for chunk in r.iter_content(1 << 16):
                         f.write(chunk)
             if dest.stat().st_size > 0:
+                if label == "preset":
+                    log.warning("Calidad reducida (preset), el original "
+                                "fallo: %s", original)
                 return url
             dest.unlink(missing_ok=True)
         except (requests.RequestException, OSError) as e:
@@ -1220,13 +1302,32 @@ async def ensure_group(client):
                     "'%s' es un canal, no un supergrupo: no admite temas. "
                     "Renombralo o borralo para que se cree el supergrupo.",
                     CHANNEL_NAME)
+            _remember_group(ent)
             return ent
     log.info("creando supergrupo privado %s con temas", CHANNEL_NAME)
     res = await client(CreateChannelRequest(
         title=CHANNEL_NAME,
         about="Imagenes de la portada de WWE.com",
         megagroup=True, forum=True))
+    _remember_group(res.chats[0])
     return res.chats[0]
+
+
+def _remember_group(ent):
+    """
+    Guarda el id del supergrupo en la BD: el bot (wwe_bot.py) no usa la
+    sesion de usuario y lo necesita para armar los enlaces t.me/c/<id>/<msg>
+    del registro de ultimas imagenes.
+    """
+    try:
+        conn = db_connect()
+        try:
+            if bf_get(conn, "group_id") != str(ent.id):
+                bf_set(conn, "group_id", ent.id)
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        log.debug("No se pudo guardar group_id: %s", e)
 
 
 async def ensure_topics(client, group, nombres):
@@ -1332,10 +1433,12 @@ async def publish(client, group, topic_id, path, item):
     return False
 
 
-async def edit_media(client, group, message_id, path, item):
+async def edit_media(client, group, message_id, path, item, as_doc=True):
     """
     Reemplaza el archivo de un mensaje ya publicado (ver run_superstars:
     mejora de 'temp' a original sin editar dos veces el mismo luchador).
+    as_doc: igual que en publish(), documento para iconos/superstars y foto
+    para el resto (ver run_upgrade_quality).
     Devuelve el Message editado, o False si fallo.
     """
     for _ in range(MAX_RETRIES):
@@ -1343,7 +1446,7 @@ async def edit_media(client, group, message_id, path, item):
             return await client.edit_message(
                 group, message_id, file=str(path),
                 text=build_caption(item), parse_mode="html",
-                force_document=True)
+                force_document=as_doc)
         except FloodWaitError as e:
             log.warning("FloodWait al editar: %ds", e.seconds)
             await asyncio.sleep(e.seconds + 5)
@@ -2649,6 +2752,66 @@ async def run_superstars_sweep(dry_run=False, client=None):
             await client.disconnect()
 
 
+async def run_upgrade_quality(dry_run=False, client=None):
+    """
+    Reintenta el ORIGINAL de todo lo publicado con calidad 'temp' (el
+    original fallo y se subio el preset de respaldo) y, si ya esta
+    disponible, edita el mismo mensaje con la imagen buena.
+
+    Generaliza lo que run_superstars hacia solo para luchadores: cubre
+    portada, shows, events e iconos. Solo puede mejorar filas con
+    message_id (las publicadas desde que record() lo guarda siempre).
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir; si no, esta funcion crea y cierra el suyo.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        filas = conn.execute(
+            "SELECT cid,title,url,image,content_type,show,topic,message_id "
+            "FROM seen WHERE sent=1 AND quality='temp' "
+            "AND message_id IS NOT NULL").fetchall()
+        log.info("Mejora de calidad: %d publicaciones pendientes.", len(filas))
+        if not filas or dry_run:
+            return 0
+
+        if client is None:
+            client = await get_client()
+        group = await ensure_group(client)
+
+        mejoradas = 0
+        for cid, title, url, image, ctype, show, topic, mid in filas:
+            it = {"cid": cid, "title": title or "", "url": url or "",
+                  "image": strip_style(image or ""), "image_fallback": None,
+                  "content_type": ctype or "unknown", "show": show or "",
+                  "topic": topic}
+            if not it["image"]:
+                continue
+            path = download_image(session, it, only_original=True)
+            if not path:
+                continue  # sigue 'temp', se reintenta la proxima vez
+            try:
+                msg = await edit_media(
+                    client, group, mid, path, it,
+                    as_doc=it["content_type"] in ("icon", "superstar"))
+            finally:
+                path.unlink(missing_ok=True)
+            if msg:
+                record(conn, it, True, message_id=mid, quality="final")
+                mejoradas += 1
+                log.info("%s: mejorado a calidad original.", cid)
+            await asyncio.sleep(SEND_DELAY)
+
+        log.info("Mejora de calidad: %d de %d mejoradas.", mejoradas, len(filas))
+        return mejoradas
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
 WATCH_INTERVAL_SECONDS = int(os.environ.get("WWE_WATCH_INTERVAL", "300"))
 
 # Cada cuantas vueltas del loop de --watch se revisan galerias/superstars
@@ -2715,6 +2878,11 @@ async def run_watch(dry_run=False):
                 except Exception:
                     log.exception("Watch: error revisando shows/eventos; sigo.")
 
+                try:
+                    await run_upgrade_quality(dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Watch: error mejorando calidad; sigo.")
+
             await asyncio.sleep(WATCH_INTERVAL_SECONDS)
     finally:
         if client:
@@ -2738,13 +2906,17 @@ async def do_login():
 LAST_PAGE_ESTIMATE = 2222  # medido por busqueda binaria contra el feed
 
 
-def show_status():
-    """Progreso del volcado, para seguir una corrida de dias."""
+def status_text():
+    """Progreso del volcado, para seguir una corrida de dias (texto plano)."""
     conn = db_connect()
+    lineas = []
     try:
         vistos = conn.execute("SELECT COUNT(*) FROM seen").fetchone()[0]
         enviados = conn.execute(
             "SELECT COUNT(*) FROM seen WHERE sent=1").fetchone()[0]
+        temp = conn.execute(
+            "SELECT COUNT(*) FROM seen WHERE sent=1 AND quality='temp'"
+        ).fetchone()[0]
         page = int(bf_get(conn, "page", "0"))
         done = bf_get(conn, "done") == "1"
 
@@ -2756,36 +2928,80 @@ def show_status():
         ss_total = int(bf_get(conn, "superstars_total", "0"))
         ss_done = bf_get(conn, "superstars_done") == "1"
 
-        print("Publicados     : %d" % enviados)
-        print("Vistos (indice): %d" % vistos)
-        print()
-        print("PORTADA  pagina %d de ~%d (%.1f%%)%s"
-              % (page, LAST_PAGE_ESTIMATE,
-                 100.0 * page / LAST_PAGE_ESTIMATE,
-                 "  [COMPLETO]" if done else ""))
+        lineas.append("Publicados     : %d" % enviados)
+        lineas.append("Vistos (indice): %d" % vistos)
+        lineas.append("Calidad temp   : %d (pendientes de original)" % temp)
+        lineas.append("")
+        lineas.append("PORTADA  pagina %d de ~%d (%.1f%%)%s"
+                      % (page, LAST_PAGE_ESTIMATE,
+                         100.0 * page / LAST_PAGE_ESTIMATE,
+                         "  [COMPLETO]" if done else ""))
         if not done:
             faltan = max(0, (LAST_PAGE_ESTIMATE - page)) * 10
             horas = faltan * SEND_DELAY / 3600.0
-            print("         faltan ~%d items, %.0f h a %.0fs/envio (%.1f GB)"
-                  % (faltan, horas, SEND_DELAY, faltan * 1.7 / 1024))
-        print("GALERIAS pagina %d, %d galerias publicadas%s"
-              % (ph_page, ph_total, "  [COMPLETO]" if ph_done else ""))
-        print("SUPERSTARS pagina %d, %d luchadores publicados%s"
-              % (ss_page, ss_total, "  [COMPLETO]" if ss_done else ""))
+            lineas.append("         faltan ~%d items, %.0f h a %.0fs/envio (%.1f GB)"
+                          % (faltan, horas, SEND_DELAY, faltan * 1.7 / 1024))
+        lineas.append("GALERIAS pagina %d, %d galerias publicadas%s"
+                      % (ph_page, ph_total, "  [COMPLETO]" if ph_done else ""))
+        lineas.append("SUPERSTARS pagina %d, %d luchadores publicados%s"
+                      % (ss_page, ss_total, "  [COMPLETO]" if ss_done else ""))
         por_tema = conn.execute(
             "SELECT topic, COUNT(*) FROM seen WHERE sent=1 "
             "GROUP BY topic ORDER BY 2 DESC").fetchall()
         if por_tema:
-            print("Por tema       : " +
-                  ", ".join("%s %d" % (t or "-", n) for t, n in por_tema))
+            lineas.append("Por tema       : " +
+                          ", ".join("%s %d" % (t or "-", n) for t, n in por_tema))
     finally:
         conn.close()
+    return "\n".join(lineas)
+
+
+def show_status():
+    print(status_text())
+    return 0
+
+
+def recent_images(n=10):
+    """
+    Las n ultimas imagenes publicadas, de la mas reciente a la mas antigua.
+
+    Ordena por sent_at; las filas anteriores a esa columna caen a
+    first_seen. Las marcas 'gal:<url>' se excluyen: son el duplicado por URL
+    de una galeria que ya aparece por su nid.
+
+    Devuelve (group_id o None, [dict de cada fila]).
+    """
+    conn = db_connect()
+    try:
+        filas = conn.execute(
+            "SELECT cid,title,url,image,content_type,topic,message_id,quality,"
+            "COALESCE(sent_at, first_seen) AS cuando FROM seen "
+            "WHERE sent=1 AND cid NOT LIKE 'gal:%' "
+            "ORDER BY cuando DESC LIMIT ?", (int(n),)).fetchall()
+        gid = bf_get(conn, "group_id")
+    finally:
+        conn.close()
+    claves = ("cid", "title", "url", "image", "content_type", "topic",
+              "message_id", "quality", "when")
+    return (int(gid) if gid else None), [dict(zip(claves, f)) for f in filas]
+
+
+def show_recent(n):
+    _gid, filas = recent_images(n)
+    for f in filas:
+        print("%s  %-11s %-5s %s\n    %s" % (
+            (f["when"] or "")[:19].replace("T", " "), f["topic"] or "-",
+            f["quality"] or "", (f["title"] or "")[:70], f["image"]))
+    if not filas:
+        print("Todavia no hay imagenes publicadas.")
     return 0
 
 
 async def amain(args):
     if args.status:
         return show_status()
+    if args.recent:
+        return show_recent(args.recent)
     if args.login:
         return await do_login()
 
@@ -2805,14 +3021,20 @@ async def amain(args):
         modos = ["events"]
     elif args.events_local:
         modos = ["events_local"]
+    elif args.upgrade_quality:
+        modos = ["upgrade"]
     else:
         modos = ["photos" if args.photos else "feed"]
+    tomados = []
     try:
         for m in modos:
             acquire_lock(m)
+            tomados.append(m)
     except AlreadyRunning as e:
         log.warning("Ya hay una ejecucion en curso: %s. Salgo.", e)
-        for m in modos:
+        # Solo los que tomo este proceso: el lock ocupado es de otro que
+        # sigue corriendo, y borrarlo lo dejaria desprotegido.
+        for m in tomados:
             release_lock(m)
         return 0
     try:
@@ -2832,6 +3054,8 @@ async def amain(args):
             await run_events(args.dry_run)
         elif args.events_local:
             await run_events_local(args.dry_run)
+        elif args.upgrade_quality:
+            await run_upgrade_quality(args.dry_run)
         elif args.photos:
             await run_photos(args.limit, args.from_page, args.dry_run)
         elif args.backfill:
@@ -2902,8 +3126,13 @@ def main():
     ap.add_argument("--from-page", type=int, default=None, metavar="N",
                     help="con --backfill/--photos/--superstars: reanuda "
                          "desde esta pagina, ignorando el progreso guardado")
+    ap.add_argument("--upgrade-quality", action="store_true",
+                    help="reintenta el original de lo publicado con el "
+                         "preset de respaldo y edita el mensaje")
     ap.add_argument("--status", action="store_true",
                     help="muestra el progreso y sale")
+    ap.add_argument("--recent", type=int, default=0, metavar="N",
+                    help="muestra las N ultimas imagenes publicadas y sale")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
