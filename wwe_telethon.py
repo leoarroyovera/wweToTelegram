@@ -261,7 +261,7 @@ SHOW_TO_TOPIC = {
 # .png/.svg de marca (logos, iconos de nav): van al final, son la prioridad
 # mas baja de contenido real. Sin una entrada propia caerian al 9 y con un
 # limite bajo no se publicarian nunca.
-TYPE_PRIORITY = {"article": 0, "video": 1, "video_playlist": 2,
+TYPE_PRIORITY = {"banner": 0, "article": 0, "video": 1, "video_playlist": 2,
                  "gallery": 2, "image": 3, "icon": 4, "unknown": 5}
 SHOW_PRIORITY = {
     "wrestlemania": 0, "summerslam": 0, "royalrumble": 0, "survivorseries": 0,
@@ -1172,6 +1172,85 @@ def scrape_loose_images(markup, source="portada"):
     return items
 
 
+BANNER_RE = re.compile(
+    r'<a href="([^"]+)">\s*<article class="node node--type-link '
+    r'node--view-mode-show-contextual-banner-image\b.*?</article>', re.S)
+CONTEXTUAL_A_RE = re.compile(
+    r'<a\b(?=[^>]*\bshow-contextual-article--type\b)([^>]*)>(.*?)</a>', re.S)
+
+
+def _attr(tag, nombre):
+    m = re.search(r'\b%s="([^"]*)"' % nombre, tag)
+    return html.unescape(m.group(1)).strip() if m else ""
+
+
+def _show_from_url(url):
+    """Slug de show a partir de /shows/<slug>/...: 'raw', 'smackdown'..."""
+    m = re.search(r"/shows/([a-z0-9-]+)", url or "")
+    if not m:
+        return ""
+    slug = m.group(1).replace("-", "")
+    return slug if slug in SHOW_TO_TOPIC else m.group(1)
+
+
+def scrape_show_contextual(markup):
+    """
+    Modulo central de la home ("show contextual"): el banner del proximo
+    episodio y las notas destacadas de ese show.
+
+    Antes solo entraban como imagenes sueltas, con el nombre de archivo de
+    titulo y al tema Otros. Peor: WWE reutiliza la misma foto semanas
+    despues (el banner de 'Raw: Oct. 19, 2026' usaba una foto del 25 de
+    agosto), y como la imagen suelta se identifica por su ruta, el banner
+    nuevo se daba por ya publicado.
+
+    - Banner: cid 'banner:<enlace>|<ruta de imagen>', asi que se publica de
+      nuevo con cada episodio o cada cambio de imagen. Va al tema del show.
+    - Notas destacadas: traen data-nid, el mismo cid que las feed-cards, asi
+      que no se duplican con el feed y salen con su titulo real.
+    """
+    items = []
+    for m in BANNER_RE.finditer(markup):
+        href = urljoin(BASE_URL, html.unescape(m.group(1)))
+        img = re.search(r'<img[^>]+src="([^"]+)"', m.group(0))
+        if not img:
+            continue
+        original, preset = image_urls(img.group(1))
+        # El titulo del episodio esta en el widget de compartir del banner.
+        cola = markup[m.end():m.end() + 5000]
+        titulo = _attr(cola, "data-a2a-title")
+        show = _show_from_url(href)
+        ruta = original.split(BASE_URL, 1)[-1]
+        it = {"cid": "banner:%s|%s" % (href.split(BASE_URL, 1)[-1], ruta),
+              "title": titulo or href.rstrip("/").split("/")[-1],
+              "url": href, "image": original, "image_fallback": preset,
+              "content_type": "banner", "show": show}
+        it["topic"] = SHOW_TO_TOPIC.get(show, TOPIC_OTHER)
+        items.append(it)
+
+    vistos = set()
+    for m in CONTEXTUAL_A_RE.finditer(markup):
+        tag, cuerpo = m.groups()
+        nid = _attr(tag, "data-nid")
+        if not nid or nid in vistos:
+            continue
+        img = (re.search(r'<img[^>]+src="([^"]+)"', cuerpo)
+               or re.search(r'srcset="([^"\s]+)', cuerpo))
+        if not img:
+            continue
+        vistos.add(nid)
+        href = urljoin(BASE_URL, _attr(tag, "href"))
+        original, preset = image_urls(img.group(1))
+        it = {"cid": nid,
+              "title": _attr(tag, "title") or _attr(tag, "alt") or "(sin titulo)",
+              "url": href, "image": original, "image_fallback": preset,
+              "content_type": _attr(tag, "data-ct") or "article",
+              "show": _show_from_url(href)}
+        it["topic"] = topic_for(it)
+        items.append(it)
+    return items
+
+
 def human(n):
     """Tamano legible."""
     for u in ("B", "KB", "MB", "GB"):
@@ -1392,6 +1471,8 @@ def build_caption(item):
         tags.append("#Show")
     elif item["content_type"] == "event":
         tags.append("#Evento")
+    elif item["content_type"] == "banner":
+        tags.append("#Portada")
     if tags:
         cap += "\n" + " ".join(tags)
     if item["url"]:
@@ -1747,7 +1828,15 @@ async def run_once(dry_run=False, client=None):
             try:
                 home = session.get(HOMEPAGE_URL, timeout=30)
                 home.raise_for_status()
-                sueltas = scrape_loose_images(home.text)
+                # Banner central y notas del show primero, con su titulo y
+                # tema; sus imagenes ya no se repiten como sueltas.
+                contexto = scrape_show_contextual(home.text)
+                seen.update(i["cid"] for i in contexto)
+                collected.extend(contexto)
+                ya = {i["image"] for i in contexto}
+                log.info("Home: %d del banner/show destacado", len(contexto))
+                sueltas = [i for i in scrape_loose_images(home.text)
+                           if i["image"] not in ya]
                 nuevas = [i for i in sueltas if i["cid"] not in seen]
                 seen.update(i["cid"] for i in nuevas)
                 collected.extend(nuevas)
