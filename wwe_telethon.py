@@ -1173,7 +1173,7 @@ def scrape_loose_images(markup, source="portada"):
 
 
 BANNER_RE = re.compile(
-    r'<a href="([^"]+)">\s*<article class="node node--type-link '
+    r'<a href="([^"]+)">\s*<article class="node node--type-[a-z_]+ '
     r'node--view-mode-show-contextual-banner-image\b.*?</article>', re.S)
 CONTEXTUAL_A_RE = re.compile(
     r'<a\b(?=[^>]*\bshow-contextual-article--type\b)([^>]*)>(.*?)</a>', re.S)
