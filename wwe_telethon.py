@@ -159,6 +159,13 @@ SUPERSTARS_VIEW = "current_superstar"
 SUPERSTARS_DISPLAY = "block_1"
 SUPERSTARS_PATH = "/superstars"
 
+# Listado de noticias (/news): vista Drupal 'news', 50 cards por pagina, ~900
+# paginas. Paginacion clasica pero responde igual a /views/ajax.
+NEWS_URL = BASE_URL + "/news"
+NEWS_VIEW = "news"
+NEWS_DISPLAY = "block_1"
+NEWS_PATH = "/node/50000005"
+
 SHOWS_URL = BASE_URL + "/shows"
 EVENTS_URL = BASE_URL + "/events/"
 
@@ -205,6 +212,7 @@ TOPIC_OTHER = "Otros"
 TOPIC_ICONS = "Iconos"
 TOPIC_SUPERSTARS = "Superstars"
 TOPIC_SHOWS = "Shows"
+TOPIC_NEWS = "Noticias"
 # Sub-shows recurrentes que no son PLE ni el programa principal de un show
 # grande (Raw Talk, WWE 205 Live, The Bump...): antes cabian todos en Otros
 # junto con slugs de superstars individuales, dejandolo con mas de 4.200
@@ -214,7 +222,7 @@ TOPIC_SHOWS_MENORES = "Otros Shows"
 
 TOPICS_ORDER = [TOPIC_ARTICLES, TOPIC_EVENTS, "Raw", "SmackDown", "NXT",
                 TOPIC_SHOWS_MENORES, TOPIC_OTHER, TOPIC_ICONS,
-                TOPIC_SUPERSTARS, TOPIC_SHOWS]
+                TOPIC_SUPERSTARS, TOPIC_SHOWS, TOPIC_NEWS]
 
 # Slug de show (clase CSS de la card) -> tema.
 SHOW_TO_TOPIC = {
@@ -782,6 +790,48 @@ def parse_superstars_page(markup):
             "topic": TOPIC_SUPERSTARS,
         }
         items.append(it)
+    return items
+
+
+NEWS_CARD_RE = re.compile(
+    r'<div class="landing-page--feed-card\b.*?</div>\s*</div>\s*</div>', re.S)
+
+
+def parse_news_page(markup):
+    """
+    Noticias del listado /news (plantilla 'landing-page--feed-card', la
+    misma que /photos). Sin id numerico expuesto: la ruta del enlace, unica
+    y estable, hace de cid. La imagen del listado es un preset pequeno
+    (wwe_16_9_s); image_urls() deduce el original.
+    """
+    items, vistos = [], set()
+    for bloque in NEWS_CARD_RE.findall(markup):
+        href = re.search(r'<a href="(/[^"]+)" hreflang', bloque)
+        img = re.search(r'src="([^"]+\.(?:jpe?g|png|webp))"', bloque, re.I)
+        if not href or not img:
+            continue
+        ruta = html.unescape(href.group(1))
+        if ruta in vistos:
+            continue
+        vistos.add(ruta)
+
+        t = re.search(r'<h2[^>]*>\s*<a [^>]*>(.*?)</a>', bloque, re.S)
+        titulo = html.unescape(re.sub(r"<[^>]+>", " ", t.group(1))).strip() if t else ""
+        titulo = re.sub(r"\s+", " ", titulo)
+
+        # "2 hours ago | SmackDown": el show va tras la barra.
+        sh = re.search(r"\|\s*([^<\n]+)", bloque)
+        crudo = re.sub(r"[^a-z0-9]", "", sh.group(1).lower()) if sh else ""
+        show = crudo if crudo in SHOW_LABEL else ""
+
+        image, fallback = image_urls(img.group(1))
+        items.append({
+            "cid": "news:" + ruta,
+            "title": titulo or ruta.rstrip("/").split("/")[-1],
+            "url": urljoin(BASE_URL, ruta),
+            "image": image, "image_fallback": fallback,
+            "content_type": "news", "show": show, "topic": TOPIC_NEWS,
+        })
     return items
 
 
@@ -1473,6 +1523,8 @@ def build_caption(item):
         tags.append("#Evento")
     elif item["content_type"] == "banner":
         tags.append("#Portada")
+    elif item["content_type"] == "news":
+        tags.append("#Noticia")
     if tags:
         cap += "\n" + " ".join(tags)
     if item["url"]:
@@ -2186,6 +2238,138 @@ async def run_superstars(limit=0, start_page=None, dry_run=False, client=None):
             await client.disconnect()
 
 
+async def run_news(limit=0, start_page=None, dry_run=False, client=None,
+                   sweep=False):
+    """
+    Modo NEWS: recorre /news (~900 paginas de 50 noticias, de la mas reciente
+    a la mas antigua) y publica la imagen de cada una en el tema Noticias.
+
+    Reanudable ('news_page' en la tabla backfill, 'news_done' al llegar al
+    final). Con sweep=True es la vigilancia de novedades: arranca siempre en
+    la pagina 0, no toca el progreso y corta en la primera pagina sin
+    noticias nuevas (el listado va por fecha).
+
+    `client`: si se pasa un TelegramClient ya conectado, se reusa y NO se
+    desconecta al salir.
+    """
+    conn = db_connect()
+    own_client = client is None
+    session = new_session()
+    try:
+        if sweep:
+            page = 0
+        else:
+            page = (int(bf_get(conn, "news_page", "0"))
+                    if start_page is None else start_page)
+        hechos = int(bf_get(conn, "news_total", "0"))
+        log.info("Noticias%s desde la pagina %d (llevaba %d).",
+                 "-sweep" if sweep else "", page, hechos)
+
+        try:
+            r = session.get(NEWS_URL, timeout=30)
+            r.raise_for_status()
+            m = re.search(r"js-view-dom-id-([0-9a-f]{16,})", r.text)
+            dom_id = m.group(1) if m else ""
+        except requests.RequestException as e:
+            log.error("No se pudo abrir /news: %s", e)
+            return 0
+
+        topics = None
+        if not dry_run:
+            if client is None:
+                client = await get_client()
+            group = await ensure_group(client)
+            topics = await ensure_topics(client, group, TOPICS_ORDER)
+
+        procesadas, vacias, nuevas_total = 0, 0, 0
+        while limit == 0 or procesadas < limit:
+            try:
+                markup = fetch_page(session, dom_id, page, view=NEWS_VIEW,
+                                    display=NEWS_DISPLAY, path=NEWS_PATH)
+            except RuntimeError as e:
+                log.warning("%s; salto a la siguiente pagina.", e)
+                page += 1
+                continue
+
+            noticias = parse_news_page(markup)
+            if not noticias:
+                vacias += 1
+                if vacias >= 2:
+                    log.info("Pagina %d vacia dos veces: fin de /news.", page)
+                    if not sweep:
+                        bf_set(conn, "news_done", "1")
+                    break
+                page += 1
+                continue
+            vacias = 0
+
+            nuevos = [it for it in noticias if not already_seen(conn, it["cid"])]
+            pendientes = [it for it in noticias
+                          if already_seen(conn, it["cid"])
+                          and pending_quality(conn, it["cid"])]
+            log.info("Noticias: pagina %d, %d noticias, %d nuevas, %d "
+                     "pendientes de calidad maxima (total: %d)",
+                     page, len(noticias), len(nuevos), len(pendientes), hechos)
+            if sweep and not nuevos and not pendientes:
+                break
+
+            for it in nuevos:
+                if dry_run:
+                    log.info("[DRY-RUN] %-9s | %s", it["topic"], it["title"][:62])
+                    continue
+                path = download_image(session, it)
+                usando_preset = path and it.get("image_used") == it.get("image_fallback")
+                if not path:
+                    log.error("Sin imagen para %s; se marca como visto.", it["cid"])
+                    record(conn, it, False)
+                    continue
+                try:
+                    msg = await publish(client, group, topics[it["topic"]], path, it)
+                finally:
+                    path.unlink(missing_ok=True)
+                record(conn, it, msg, message_id=(msg.id if msg else None),
+                       quality=("temp" if (msg and usando_preset) else
+                                ("final" if msg else None)))
+                if msg:
+                    hechos += 1
+                    nuevas_total += 1
+                    bf_set(conn, "news_total", hechos)
+                await asyncio.sleep(SEND_DELAY)
+
+            for it in pendientes:
+                if dry_run:
+                    continue
+                mid = get_message_id(conn, it["cid"])
+                if not mid:
+                    continue
+                path = download_image(session, it, only_original=True)
+                if not path:
+                    continue
+                try:
+                    msg = await edit_media(client, group, mid, path, it,
+                                           as_doc=False)
+                finally:
+                    path.unlink(missing_ok=True)
+                if msg:
+                    record(conn, it, True, message_id=mid, quality="final")
+                await asyncio.sleep(SEND_DELAY)
+
+            page += 1
+            procesadas += 1
+            if not dry_run and not sweep:
+                if page > int(bf_get(conn, "news_page", "0")):
+                    bf_set(conn, "news_page", page)
+            time.sleep(1.0)  # cortesia con el servidor
+
+        log.info("Noticias: %d paginas, %d publicadas ahora. Proxima pagina: %d",
+                 procesadas, nuevas_total, page)
+        return hechos
+    finally:
+        conn.close()
+        if own_client and client:
+            await client.disconnect()
+
+
 async def run_shows(dry_run=False, client=None):
     """
     Modo SHOWS: /shows es un hub estatico y pequeno (9 shows fijos: Raw,
@@ -2570,6 +2754,7 @@ async def run_backfill_all(dry_run=False):
             feed_done = bf_get(c, "done") == "1"
             photos_done = bf_get(c, "photos_done") == "1"
             superstars_done = bf_get(c, "superstars_done") == "1"
+            news_done = bf_get(c, "news_done") == "1"
             c.close()
 
             if tanda % NOVEDADES_CADA_TANDAS == 0:
@@ -2587,7 +2772,7 @@ async def run_backfill_all(dry_run=False):
                 except Exception:
                     log.exception("Error revisando shows/eventos (#%d); sigo.", tanda)
 
-            if feed_done and photos_done and superstars_done:
+            if feed_done and photos_done and superstars_done and news_done:
                 # El historico ya termino, pero las novedades siguen
                 # llegando: no se corta, solo se espacian mas las vueltas
                 # para no golpear el sitio sin necesidad.
@@ -2619,6 +2804,14 @@ async def run_backfill_all(dry_run=False):
                     log.exception("Error en tanda de superstars (#%d); sigo.", tanda)
             else:
                 log.info("Superstars ya completos.")
+
+            if not news_done:
+                try:
+                    await run_news(limit=1, dry_run=dry_run, client=client)
+                except Exception:
+                    log.exception("Error en tanda de noticias (#%d); sigo.", tanda)
+            else:
+                log.info("Noticias ya completas.")
 
             await asyncio.sleep(2.0)  # cortesia extra entre tandas alternadas
     finally:
@@ -2949,6 +3142,11 @@ async def run_watch(dry_run=False):
             except Exception:
                 log.exception("Watch: error revisando portada; sigo.")
 
+            try:
+                await run_news(dry_run=dry_run, client=client, sweep=True)
+            except Exception:
+                log.exception("Watch: error revisando noticias; sigo.")
+
             if vuelta % WATCH_SWEEP_CADA_VUELTAS == 0:
                 try:
                     await run_photos_sweep(dry_run=dry_run, client=client)
@@ -3034,6 +3232,10 @@ def status_text():
                       % (ph_page, ph_total, "  [COMPLETO]" if ph_done else ""))
         lineas.append("SUPERSTARS pagina %d, %d luchadores publicados%s"
                       % (ss_page, ss_total, "  [COMPLETO]" if ss_done else ""))
+        lineas.append("NOTICIAS pagina %d, %d noticias publicadas%s"
+                      % (int(bf_get(conn, "news_page", "0")),
+                         int(bf_get(conn, "news_total", "0")),
+                         "  [COMPLETO]" if bf_get(conn, "news_done") == "1" else ""))
         por_tema = conn.execute(
             "SELECT topic, COUNT(*) FROM seen WHERE sent=1 "
             "GROUP BY topic ORDER BY 2 DESC").fetchall()
@@ -3101,7 +3303,9 @@ async def amain(args):
     # novedades) y no deberian convivir con --backfill/--photos/
     # --superstars sueltos pisando el mismo progreso a la vez.
     if args.backfill_all or args.watch:
-        modos = ["feed", "photos", "superstars"]
+        modos = ["feed", "photos", "superstars", "news"]
+    elif args.news:
+        modos = ["news"]
     elif args.superstars:
         modos = ["superstars"]
     elif args.shows:
@@ -3137,6 +3341,8 @@ async def amain(args):
             await run_watch(args.dry_run)
         elif args.superstars:
             await run_superstars(args.limit, args.from_page, args.dry_run)
+        elif args.news:
+            await run_news(args.limit, args.from_page, args.dry_run)
         elif args.shows:
             await run_shows(args.dry_run)
         elif args.events:
@@ -3180,6 +3386,10 @@ def main():
     ap.add_argument("--superstars", action="store_true",
                     help="MODO SUPERSTARS: recorre /superstars y publica "
                          "la foto de perfil de cada luchador. Reanudable.")
+    ap.add_argument("--news", action="store_true",
+                    help="MODO NEWS: recorre /news (~900 paginas) y publica "
+                         "la imagen de cada noticia en el tema Noticias. "
+                         "Reanudable.")
     ap.add_argument("--shows", action="store_true",
                     help="MODO SHOWS: revisa el hub estatico /shows (9 shows "
                          "fijos) y publica los que falten. Sin paginacion.")

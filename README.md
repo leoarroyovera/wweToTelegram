@@ -65,6 +65,7 @@ python wwe_telethon.py --dry-run    # scrapea y ordena sin tocar Telegram
 python wwe_telethon.py              # PORTADA: publica lo nuevo
 python wwe_telethon.py --photos     # GALERIAS: recorre /photos
 python wwe_telethon.py --superstars # SUPERSTARS: recorre /superstars
+python wwe_telethon.py --news       # NEWS: recorre /news (~900 paginas), reanudable
 python wwe_telethon.py --shows      # SHOWS: revisa el hub /shows
 python wwe_telethon.py --events     # EVENTS: revisa /events/ (novedades)
 python wwe_telethon.py --loop       # bucle cada 30 min (always-on task)
@@ -135,7 +136,7 @@ estado de `wwe_seen.sqlite3` y `wwe_telethon.log`.
 | `/estado` | Progreso de cada modo, procesos lanzados y locks activos |
 | `/log [n]` | Las **n últimas imágenes cargadas** (defecto 10, máx. 100), con enlace al mensaje y a la imagen |
 | `/tail [n]` | Las n últimas líneas de `wwe_telethon.log` |
-| `/run <modo>` | Lanza `portada`, `watch`, `photos`, `superstars`, `shows`, `events`, `events-local`, `backfill-all`, `calidad` o `dry-run` |
+| `/run <modo>` | Lanza `portada`, `watch`, `photos`, `superstars`, `shows`, `news`, `events`, `events-local`, `backfill-all`, `calidad` o `dry-run` |
 | `/stop <modo>` | Detiene un modo lanzado desde el bot |
 | `/calidad` | Reintenta el original de lo subido con el preset de respaldo |
 
@@ -451,6 +452,16 @@ intermitente** en las pruebas (nada raro: es lo que ya maneja
 `download_to()` con su reintento al preset). El preset de respaldo más
 grande disponible es `wwe_1_1_540__composite` (540×540); uno más grande
 (`..._xl__composite`) no existe para este campo y da 404.
+
+### `/news`: noticias, tema `Noticias`
+
+Vista Drupal `news`/`block_1` (paginador clásico, pero responde igual a
+`/views/ajax`): 50 noticias por página, ~918 páginas, de la más reciente a la
+más antigua. El id es la ruta del enlace (`news:<ruta>`) y la imagen del
+listado (preset `wwe_16_9_s`) se sube a su original con `strip_style`. Las
+cards con el logo placeholder (SVG) se omiten. `--news` es reanudable
+(`news_page`/`news_done`); `--backfill-all` lo incluye y `--watch` lo revisa
+en cada vuelta desde la página 0, cortando en la primera sin novedades.
 
 ### `/shows`: hub estático, sin paginación
 

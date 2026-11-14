@@ -75,6 +75,7 @@ MODOS = {
     "watch": (["--watch"], "Vigilancia continua de todo"),
     "photos": (["--photos"], "Galerias (/photos), reanudable"),
     "superstars": (["--superstars"], "Superstars, reanudable"),
+    "news": (["--news"], "Noticias (/news), reanudable"),
     "shows": (["--shows"], "Hub /shows"),
     "events": (["--events"], "Proximos eventos (/events)"),
     "events-local": (["--events-local"], "Logos de eventos cercanos"),
