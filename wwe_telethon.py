@@ -165,6 +165,10 @@ NEWS_URL = BASE_URL + "/news"
 NEWS_VIEW = "news"
 NEWS_DISPLAY = "block_1"
 NEWS_PATH = "/node/50000005"
+# Paginas maximas por pasada del sweep (vigilancia) y por vuelta de --watch
+# para el historico: acotado para no frenar el resto de fuentes.
+NEWS_SWEEP_MAX_PAGES = 3
+NEWS_BACKFILL_PAGES_POR_VUELTA = 2
 
 SHOWS_URL = BASE_URL + "/shows"
 EVENTS_URL = BASE_URL + "/events/"
@@ -2283,6 +2287,8 @@ async def run_news(limit=0, start_page=None, dry_run=False, client=None,
 
         procesadas, vacias, nuevas_total = 0, 0, 0
         while limit == 0 or procesadas < limit:
+            if sweep and procesadas >= NEWS_SWEEP_MAX_PAGES:
+                break
             try:
                 markup = fetch_page(session, dom_id, page, view=NEWS_VIEW,
                                     display=NEWS_DISPLAY, path=NEWS_PATH)
@@ -3146,6 +3152,17 @@ async def run_watch(dry_run=False):
                 await run_news(dry_run=dry_run, client=client, sweep=True)
             except Exception:
                 log.exception("Watch: error revisando noticias; sigo.")
+
+            # Historico de noticias a pocos pasos por vuelta, sin bloquear.
+            try:
+                c = db_connect()
+                news_done = bf_get(c, "news_done") == "1"
+                c.close()
+                if not news_done:
+                    await run_news(limit=NEWS_BACKFILL_PAGES_POR_VUELTA,
+                                   dry_run=dry_run, client=client)
+            except Exception:
+                log.exception("Watch: error en historico de noticias; sigo.")
 
             if vuelta % WATCH_SWEEP_CADA_VUELTAS == 0:
                 try:
